@@ -1,14 +1,14 @@
 #!/bin/bash
 set -e
 
-# create if doesn't exist
-git checkout beta || git checkout -b beta
+# create develop
+git checkout -b develop
 
-# add a feature to beta
+# add a feature to develop
 mkdir src || true
 touch src/feat.txt
 git add src/feat.txt
-git commit -m "add feature"
+git commit -m "add beta feature"
 cz bump --prerelease beta --increment MINOR
 
 # add a hotfix to master
@@ -16,23 +16,23 @@ git checkout master
 mkdir src || true
 touch src/fix.txt
 git add src/fix.txt
-git commit -m "add fix"
+git commit -m "add hotfix"
 cz bump --increment PATCH
 
-# merge the hotfix to beta
-git checkout beta
-git merge master --strategy-option ours -m "auto-merge master into beta"
+# merge the hotfix to develop
+git checkout develop
+git merge master --strategy-option ours -m "auto-merge master into develop"
 cz bump --prerelease beta --increment PATCH
 
-# add a feature fix to beta
-git checkout beta
+# add a feature fix to develop
+git checkout develop
 echo "more awesome" >> src/feat.txt
 git add src/feat.txt
-git commit -m "update feature"
+git commit -m "update beta feature"
 cz bump --prerelease beta --increment PATCH
 
 # Release time!
-# merge beta to master
+# merge develop to master
 git checkout master
-git merge beta --strategy-option theirs -m "release beta into master"
+git merge develop --strategy-option theirs -m "release develop into master"
 cz bump --increment PATCH
