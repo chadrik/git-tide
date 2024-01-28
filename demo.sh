@@ -11,6 +11,12 @@ git add src/feat.txt
 git commit -m "add feature"
 cz bump --prerelease beta --increment MINOR
 
+# add a PATCH change to beta
+echo "awesome" >> src/feat.txt
+git add src/feat.txt
+git commit -m "update feature"
+cz bump --prerelease beta --increment PATCH
+
 # add a PATCH change to master
 git checkout master
 mkdir src || true
