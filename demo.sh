@@ -3,7 +3,7 @@ set -e
 
 git_tag() {
   local tag=''
-  tag=$(cz bump "$@" --dry-run | grep tag | sed 's/tag to create: \(.*\)/\1/')
+  tag=$(PYTHONPATH=~/dev/commitizen python3.8 -m commitizen bump "$@" --dry-run | grep tag | sed 's/tag to create: \(.*\)/\1/')
   git tag "$tag"
 }
 
