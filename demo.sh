@@ -26,6 +26,7 @@ git commit --allow-empty -m "Starting staging branch"
 git_tag --prerelease rc --increment PATCH
 
 # add another feature to develop
+git checkout develop
 touch src/feat2.txt
 git add src/feat2.txt
 git commit -m "add beta feature2"
