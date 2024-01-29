@@ -22,6 +22,7 @@ git_tag --prerelease beta --increment MINOR
 
 # create staging
 git checkout -b staging
+git commit --allow-empty -m "Starting staging branch"
 git_tag --prerelease rc --increment PATCH
 
 # add another feature to develop
@@ -66,10 +67,12 @@ git_tag --increment PATCH
 echo "Converting develop branch into release candidate"
 git checkout staging
 git merge develop -m "make new release candidate"
+git commit --allow-empty -m "Starting staging branch"
 git_tag --prerelease rc --increment PATCH
 
 # start a new beta cycle
 echo "Setting up new develop branch for beta development"
 git checkout develop
 git merge staging -m "make new develop branch"
+git commit --allow-empty -m "Starting develop branch"
 git_tag --prerelease beta --increment MINOR
