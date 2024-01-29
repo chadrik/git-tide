@@ -67,13 +67,15 @@ git_tag --increment PATCH
 # develop becomes release candidate
 echo "Converting develop branch into release candidate"
 git checkout staging
-git merge develop -m "make new release candidate"
+git reset --hard develop
+#git merge develop -m "make new release candidate"
 git commit --allow-empty -m "staging: Starting branch"
 git_tag --prerelease rc --increment PATCH
 
 # start a new beta cycle
 echo "Setting up new develop branch for beta development"
 git checkout develop
-git merge staging -m "make new develop branch"
+git reset --hard master
+#git merge staging -m "make new develop branch"
 git commit --allow-empty -m "develop: Starting branch"
 git_tag --prerelease beta --increment MINOR
