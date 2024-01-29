@@ -17,19 +17,19 @@ git checkout -b develop
 mkdir src || true
 touch src/feat1.txt
 git add src/feat1.txt
-git commit -m "add beta feature1"
+git commit -m "develop: add beta feature1"
 git_tag --prerelease beta --increment MINOR
 
 # create staging
 git checkout -b staging
-git commit --allow-empty -m "Starting staging branch"
+git commit --allow-empty -m "staging: Starting branch"
 git_tag --prerelease rc --increment PATCH
 
 # add another feature to develop
 git checkout develop
 touch src/feat2.txt
 git add src/feat2.txt
-git commit -m "add beta feature2"
+git commit -m "develop: add beta feature2"
 git_tag --prerelease beta --increment MINOR
 
 # add a hotfix to master
@@ -37,24 +37,24 @@ git checkout master
 mkdir src || true
 touch src/fix.txt
 git add src/fix.txt
-git commit -m "add hotfix"
+git commit -m "master: add hotfix"
 git_tag --increment PATCH
 
 # merge the hotfix to staging
 git checkout staging
-git merge master -m "auto-merge master into staging"
+git merge master -m "auto-merge hotfix from master into staging"
 git_tag --prerelease rc --increment PATCH
 
 # merge the hotfix to develop
 git checkout develop
-git merge staging -m "auto-merge staging into develop"
+git merge staging -m "auto-merge hotfix from staging into develop"
 git_tag --prerelease beta --increment PATCH
 
 # add a feature fix to staging
 git checkout staging
 echo "more awesome" >> src/feat1.txt
 git add src/feat1.txt
-git commit -m "update beta feature"
+git commit -m "staging: update beta feature"
 git_tag --prerelease rc --increment PATCH
 
 # Release time!
@@ -68,12 +68,12 @@ git_tag --increment PATCH
 echo "Converting develop branch into release candidate"
 git checkout staging
 git merge develop -m "make new release candidate"
-git commit --allow-empty -m "Starting staging branch"
+git commit --allow-empty -m "staging: Starting branch"
 git_tag --prerelease rc --increment PATCH
 
 # start a new beta cycle
 echo "Setting up new develop branch for beta development"
 git checkout develop
 git merge staging -m "make new develop branch"
-git commit --allow-empty -m "Starting develop branch"
+git commit --allow-empty -m "develop: Starting branch"
 git_tag --prerelease beta --increment MINOR
