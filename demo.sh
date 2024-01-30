@@ -13,12 +13,16 @@ git_tag() {
 
 git checkout master
 git reset --hard demo
+mkdir src || true
+touch src/base.txt
+git add src/base.txt
+git commit -m "master: initial state"
+git tag "1.0.0"
 
 # create develop
 git checkout -b develop
 
 # add a feature to develop
-mkdir src || true
 touch src/feat1.txt
 git add src/feat1.txt
 git commit -m "develop: add beta feature1"
@@ -39,7 +43,6 @@ git_tag --prerelease beta --increment MINOR --force-prerelease
 
 # add a hotfix to master
 git checkout master
-mkdir src || true
 touch src/fix.txt
 git add src/fix.txt
 git commit -m "master: add hotfix"
