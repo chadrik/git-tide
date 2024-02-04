@@ -1,7 +1,7 @@
 
 # Gitflow + Semantic Versioning Autopilot Demo
 
-This repo demonstrates a three-branch gitflow structure with automatic tagging and merging.
+This repo demonstrates a three-branch [gitflow](https://www.atlassian.com/git/tutorials/comparing-workflows/gitflow-workflow) structure with automatic tagging and merging.
 
 ## Rules
 
@@ -20,5 +20,6 @@ In order to work, the Gitlab repo needs to be properly configured:
 
 - Create a [Project Access Token](https://docs.gitlab.com/ee/user/project/settings/project_access_tokens.html)
 - Add a [CI variable](https://docs.gitlab.com/ee/ci/variables/#for-a-project) named `ACCESS_TOKEN` with the token value
-- Add `develop` and `staging` as [protect branches](https://docs.gitlab.com/ee/user/project/protected_branches.html#add-protection-to-existing-branches)
+- Add `develop` and `staging` as [protected branches](https://docs.gitlab.com/ee/user/project/protected_branches.html#add-protection-to-existing-branches) and set "Allowed to push and merge" to "Developers + Maintainers"
+- Under "Protected branches", edit `master` and set "Allowed to push and merge" to "Developers + Maintainers"
 - Create a scheduled pipeline and create a variable `SCHEDULED_JOB_NAME=make-release`.  You can leave "Activated" unchecked to trigger the job manually.
