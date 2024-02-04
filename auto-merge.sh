@@ -30,7 +30,7 @@ if [[ $AUTO_MERGE_BRANCH ]]; then
     echo "Conflicts:"
     git diff --name-only --diff-filter=U
   else
-    # this will trigger auto-tag/merge for AUTO_MERGE_BRANCH
+    # this will trigger a full pipeline for AUTO_MERGE_BRANCH, and potentially another auto-merge
     git push gitlab_origin $AUTO_MERGE_BRANCH
   fi
 fi
