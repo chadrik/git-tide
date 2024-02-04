@@ -2,6 +2,7 @@ default:
   image: python:3.12
 
 .autotag_base:
+  allow_failure: true
   script:
     - ./auto-tag.sh
   rules:
@@ -12,17 +13,19 @@ default:
 autotag_master:
   extends: .autotag_base
   variables:
-    RELEASE_BRANCH_NAME: "master"
-    TAG_ARGS: "--increment MINOR"
-
-autotag_develop:
-  extends: .autotag_base
-  variables:
-    RELEASE_BRANCH_NAME: "develop"
-    TAG_ARGS: "--prerelease beta --increment PATCH"
+    RELEASE_BRANCH_NAME: master
+    TAG_ARGS: "--increment PATCH"
+    AUTO_MERGE_BRANCH: release
 
 autotag_release:
   extends: .autotag_base
   variables:
     RELEASE_BRANCH_NAME: "release"
     TAG_ARGS: "--prerelease rc --increment PATCH"
+    AUTO_MERGE_BRANCH: develop
+
+autotag_develop:
+  extends: .autotag_base
+  variables:
+    RELEASE_BRANCH_NAME: "develop"
+    TAG_ARGS: "--prerelease beta --increment PATCH"
