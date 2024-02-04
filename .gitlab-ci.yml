@@ -3,8 +3,7 @@ default:
 
 .autotag_base:
   allow_failure: true
-  script:
-    - ./auto-tag.sh
+  script: ./auto-tag.sh
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
@@ -29,3 +28,8 @@ tag-develop:
   variables:
     RELEASE_BRANCH: develop
     TAG_ARGS: "--prerelease beta --increment PATCH"
+
+make-release:
+  script: ./make-release.sh
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
