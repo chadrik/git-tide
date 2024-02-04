@@ -17,7 +17,7 @@ get_tag() {
   echo $(cz bump "$@" --dry-run | grep tag | sed 's/tag to create: \(.*\)/\1/')
 }
 
-pip install git+https://github.com/chadrik/commitizen@gitflow-test
+pip install -r requirements.txt
 
 # Auto-tag
 TAG=$(get_tag $TAG_ARGS)

@@ -1,16 +1,23 @@
 
-## Running the demo
+# Gitflow + Semantic Versioning Autopilot Demo
 
-```commandline
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-./demo.sh
-```
+This repo demonstrates a three-branch gitflow structure with automatic tagging and merging.
 
-## Problems
+## Rules
 
-- In a scenario where this runs as part of a merge request pipeline, it will create a version bump commit after every merged MR, which is a bit noisy
-- Adding the version to a config file like `pyproject.toml` will inevitably create merge conflicts, and it's not safe to simply always take "theirs".  Storing it in a dedicated `VERSION` file would make conflicts with that file safe to ignore.  
+Here is an overview of the rules:
 
-Both of these problems could be solved by only storing the version in a git tag, and then read by a script running the build process (e.g. `python setup.py` or `rez release`).
+- Merge requests are made against the `develop` branch (this is the default)
+- The `develop` branch is manually merged to `staging` and then to `master` on a schedule (weekly, fortnightly, etc)
+- Commits merged to `develop` auto-generate a tag with a beta suffix: e.g. `1.0.0b1`
+- Commits merged to `staging` auto-generate a tag with a release candidate suffix: e.g. `1.0.0rc1`
+- Hotfixes added to `master` automatically merge to `staging`
+- Hotfixes added to `staging` automatically merge to `develop`
+
+## Setting up a repo
+
+In order to work, the Gitlab repo needs to be properly configured:
+
+- Create a [Project Access Token](https://docs.gitlab.com/ee/user/project/settings/project_access_tokens.html)
+- Add a [CI variable](https://docs.gitlab.com/ee/ci/variables/#for-a-project) named `ACCESS_TOKEN` with the token value
+- Add `develop` and `staging` as [protect branches](https://docs.gitlab.com/ee/user/project/protected_branches.html#add-protection-to-existing-branches)
