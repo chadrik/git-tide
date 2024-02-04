@@ -1,38 +1,83 @@
 default:
   image: python:3.12
 
-.autotag_base:
-  allow_failure: true
-  script: ./auto-tag.sh
+stages:
+  - build
+  - test
+  - deploy
+
+build:
+  stage: build
+  script: echo "Building!"
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
-    - if: $CI_COMMIT_BRANCH == $RELEASE_BRANCH
+    - if: $CI_COMMIT_BRANCH ~= "/master|staging|develop/"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
-tag_and_merge-master:
-  extends: .autotag_base
+test:
+  stage: test
+  script: echo "Testing!"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - if: $CI_COMMIT_BRANCH ~= "/master|staging|develop/"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+.deploy_base:
+  stage: deploy
+  script: echo "Deploying $TARGET_BRANCH!"
+  after_script: ./auto-tag.sh
+  # releases must be performed serially, in order
+  resource_group: "$TARGET_BRANCH"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - if: $CI_COMMIT_BRANCH == $TARGET_BRANCH
+
+deploy-master:
+  extends: .deploy_base
   variables:
-    RELEASE_BRANCH: master
-    TAG_ARGS: "--increment PATCH"
+    TARGET_BRANCH: master
+
+deploy-staging:
+  extends: .deploy_base
+  variables:
+    TARGET_BRANCH: staging
+    PRE_RELEASE_TYPE: rc
+
+deploy-develop:
+  extends: .deploy_base
+  variables:
+    TARGET_BRANCH: develop
+    PRE_RELEASE_TYPE: beta
+
+.automerge_base:
+  stage: .post
+  # it's ok if auto-merge does not succeed
+  allow_failure: true
+  script: ./auto-merge.sh
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - if: $CI_COMMIT_BRANCH == $TARGET_BRANCH
+
+merge-master-to-staging:
+  extends: .automerge_base
+  variables:
+    TARGET_BRANCH: master
     AUTO_MERGE_BRANCH: staging
 
-tag_and_merge-staging:
-  extends: .autotag_base
+merge-staging-to-develop:
+  extends: .automerge_base
   variables:
-    RELEASE_BRANCH: staging
-    TAG_ARGS: "--prerelease rc --increment PATCH"
+    TARGET_BRANCH: staging
     AUTO_MERGE_BRANCH: develop
-
-tag-develop:
-  extends: .autotag_base
-  variables:
-    RELEASE_BRANCH: develop
-    TAG_ARGS: "--prerelease beta --increment PATCH"
 
 make-release:
   script: ./make-release.sh
   rules:
-    - if: $CI_PIPELINE_SOURCE != "schedule" && $CI_COMMIT_BRANCH == "master"
+    - if: $CI_PIPELINE_SOURCE != "schedule" && $CI_COMMIT_BRANCH == "master" && $CI_PIPELINE_SOURCE == "push"
       when: manual
     - if: $CI_PIPELINE_SOURCE == "schedule" && $SCHEDULED_JOB_NAME == "make-release"
       when: manual
