@@ -10,21 +10,21 @@ default:
       when: never
     - if: $CI_COMMIT_BRANCH == $RELEASE_BRANCH
 
-tag_and_merge->master:
+tag_and_merge-master:
   extends: .autotag_base
   variables:
     RELEASE_BRANCH: master
     TAG_ARGS: "--increment PATCH"
     AUTO_MERGE_BRANCH: staging
 
-tag_and_merge->staging:
+tag_and_merge-staging:
   extends: .autotag_base
   variables:
     RELEASE_BRANCH: staging
     TAG_ARGS: "--prerelease rc --increment PATCH"
     AUTO_MERGE_BRANCH: develop
 
-tag->develop:
+tag-develop:
   extends: .autotag_base
   variables:
     RELEASE_BRANCH: develop

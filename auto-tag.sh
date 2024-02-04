@@ -32,10 +32,8 @@ if [[ $AUTO_MERGE_BRANCH ]]; then
   git checkout $AUTO_MERGE_BRANCH
   git reset --hard gitlab_origin/$AUTO_MERGE_BRANCH
 
-  MSG="Auto-merge $CI_COMMIT_REF_NAME into $AUTO_MERGE_BRANCH"
-
   set +e
-  git merge temp -m "$MSG"
+  git merge $TAG -m "Auto-merge $CI_COMMIT_REF_NAME into $AUTO_MERGE_BRANCH"
   STATUS=$?
   set -e
 
