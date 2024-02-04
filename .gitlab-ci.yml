@@ -19,10 +19,10 @@ autotag_develop:
   extends: .autotag_base
   variables:
     RELEASE_BRANCH_NAME: "develop"
-    TAG_ARGS: "--prerelease beta --increment MINOR"
+    TAG_ARGS: "--prerelease beta --increment PATCH"
 
 autotag_release:
   extends: .autotag_base
   variables:
     RELEASE_BRANCH_NAME: "release"
-    TAG_ARGS: "--prerelease rc --increment MINOR"
+    TAG_ARGS: "--prerelease rc --increment PATCH"
