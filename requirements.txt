@@ -1,1 +1,1 @@
-committizen
+git+https://github.com/chadrik/commitizen@gitflow-test
