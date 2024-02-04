@@ -78,9 +78,10 @@ make-release:
   stage: deploy
   script: ./make-release.sh
   rules:
-    - if: $CI_PIPELINE_SOURCE != "schedule" && $CI_COMMIT_BRANCH == "master" && $CI_PIPELINE_SOURCE == "push"
+    # add to staging, because it will convert the latest version on staging to a release
+    - if: $CI_PIPELINE_SOURCE != "schedule" && $CI_COMMIT_BRANCH == "staging" && $CI_PIPELINE_SOURCE == "push"
       when: manual
-      # this is required to prevent this job from blocking the pipeline.
+      # allow_failure: true is required to prevent this job from blocking the pipeline.
       # Feature request: https://gitlab.com/gitlab-org/gitlab/-/issues/28036
       allow_failure: true
     - if: $CI_PIPELINE_SOURCE == "schedule" && $SCHEDULED_JOB_NAME == "make-release"
