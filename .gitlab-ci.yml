@@ -12,7 +12,7 @@ build:
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
-    - if: $CI_COMMIT_BRANCH ~= "/master|staging|develop/"
+    - if: $CI_COMMIT_BRANCH =~ /master|staging|develop/
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
 test:
@@ -21,7 +21,7 @@ test:
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
-    - if: $CI_COMMIT_BRANCH ~= "/master|staging|develop/"
+    - if: $CI_COMMIT_BRANCH =~ /master|staging|develop/
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
 .deploy_base:
