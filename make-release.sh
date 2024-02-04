@@ -12,7 +12,8 @@ get_tag() {
 }
 
 short_tag() {
-  cut -d "." -f2- <<< "$1"
+  # -f<from>-<to>
+  cut -d "." -f1-2 <<< "$1"
 }
 
 pip install -r requirements.txt
@@ -43,6 +44,4 @@ BETA_TAG=$(get_tag --prerelease beta --increment MINOR --force-prerelease)
 git commit --allow-empty -m "Starting beta development for $(short_tag $BETA_TAG)"
 git tag $BETA_TAG
 
-git push gitlab_origin "$MASTER_TAG" -o ci.skip
-git push gitlab_origin "$RC_TAG" -o ci.skip
-git push gitlab_origin "$BETA_TAG" -o ci.skip
+git push --atomic gitlab_origin master staging develop "$MASTER_TAG" "$RC_TAG" "$BETA_TAG" -o ci.skip
