@@ -2,14 +2,7 @@
 
 set -e
 
-git config user.email "fake@email.com"
-git config user.name "ci-bot"
-URL=$(cut -d "@" -f2- <<< "$CI_REPOSITORY_URL")
-git remote add gitlab_origin "https://oauth2:$ACCESS_TOKEN@$URL"
-
-get_tag() {
-  echo $(cz bump "$@" --dry-run | grep tag | sed 's/tag to create: \(.*\)/\1/')
-}
+source ./ci-common.sh
 
 short_tag() {
   # -f<from>-<to>
@@ -19,8 +12,6 @@ short_tag() {
 pip install -r requirements.txt
 
 git fetch gitlab_origin
-
-echo "pipeline source: $CI_PIPELINE_SOURCE"
 
 # Release time!
 # merge staging to master
@@ -47,6 +38,7 @@ git commit --allow-empty -m "Starting beta development for $(short_tag $BETA_TAG
 git tag $BETA_TAG
 
 # git push --atomic gitlab_origin master staging develop "$MASTER_TAG" "$RC_TAG" "$BETA_TAG" -o ci.skip
+# New tags should trigger release builds, but
 git push --atomic gitlab_origin master "$MASTER_TAG" -o ci.skip
 git push --atomic gitlab_origin staging "$RC_TAG" -o ci.skip
 git push --atomic gitlab_origin develop "$BETA_TAG" -o ci.skip
