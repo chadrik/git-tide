@@ -12,16 +12,17 @@ source ./ci-common.sh
 # Auto-merge
 if [[ $AUTO_MERGE_BRANCH ]]; then
 
-  pip install -r requirements.txt
+  git checkout -B temp
+  git fetch gitlab_origin $AUTO_MERGE_BRANCH
 
-  git fetch gitlab_origin $AUTO_MERGE_BRANCH --tags
   git checkout $AUTO_MERGE_BRANCH
   git reset --hard gitlab_origin/$AUTO_MERGE_BRANCH
 
-  TAG=$(cz version --project)
+  MSG="Auto-merge $CI_COMMIT_REF_NAME into $AUTO_MERGE_BRANCH"
+  echo $MSG
 
   set +e
-  git merge $TAG -m "Auto-merge $CI_COMMIT_REF_NAME into $AUTO_MERGE_BRANCH"
+  git merge temp -m $MSG
   STATUS=$?
   set -e
 
