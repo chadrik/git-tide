@@ -8,24 +8,24 @@ default:
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
-    - if: $CI_COMMIT_BRANCH == $RELEASE_BRANCH_NAME
+    - if: $CI_COMMIT_BRANCH == $RELEASE_BRANCH
 
-autotag_master:
+tag_and_merge->master:
   extends: .autotag_base
   variables:
-    RELEASE_BRANCH_NAME: master
+    RELEASE_BRANCH: master
     TAG_ARGS: "--increment PATCH"
-    AUTO_MERGE_BRANCH: release
+    AUTO_MERGE_BRANCH: staging
 
-autotag_release:
+tag_and_merge->staging:
   extends: .autotag_base
   variables:
-    RELEASE_BRANCH_NAME: "release"
+    RELEASE_BRANCH: staging
     TAG_ARGS: "--prerelease rc --increment PATCH"
     AUTO_MERGE_BRANCH: develop
 
-autotag_develop:
+tag->develop:
   extends: .autotag_base
   variables:
-    RELEASE_BRANCH_NAME: "develop"
+    RELEASE_BRANCH: develop
     TAG_ARGS: "--prerelease beta --increment PATCH"
