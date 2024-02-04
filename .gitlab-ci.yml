@@ -1,0 +1,26 @@
+
+.autotag_base:
+  script:
+    - ./auto-tag.sh
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - if: $CI_COMMIT_BRANCH == $RELEASE_BRANCH_NAME
+
+autotag_master:
+  extends: .autotag_base
+  variables:
+    RELEASE_BRANCH_NAME: "master"
+    TAG_ARGS: "--increment MINOR"
+
+autotag_develop:
+  extends: .autotag_base
+  variables:
+    RELEASE_BRANCH_NAME: "develop"
+    TAG_ARGS: "--prerelease beta --increment MINOR"
+
+autotag_release:
+  extends: .autotag_base
+  variables:
+    RELEASE_BRANCH_NAME: "release"
+    TAG_ARGS: "--prerelease rc --increment MINOR"
