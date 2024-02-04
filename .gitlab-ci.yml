@@ -32,4 +32,4 @@ tag-develop:
 make-release:
   script: ./make-release.sh
   rules:
-    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $SCHEDULED_JOB_NAME == "make-release"

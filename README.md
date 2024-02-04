@@ -21,3 +21,4 @@ In order to work, the Gitlab repo needs to be properly configured:
 - Create a [Project Access Token](https://docs.gitlab.com/ee/user/project/settings/project_access_tokens.html)
 - Add a [CI variable](https://docs.gitlab.com/ee/ci/variables/#for-a-project) named `ACCESS_TOKEN` with the token value
 - Add `develop` and `staging` as [protect branches](https://docs.gitlab.com/ee/user/project/protected_branches.html#add-protection-to-existing-branches)
+- Create a scheduled pipeline and create a variable `SCHEDULED_JOB_NAME=make-release`.  You can leave "Activated" unchecked to trigger the job manually.
