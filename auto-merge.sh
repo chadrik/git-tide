@@ -12,17 +12,17 @@ source ./ci-common.sh
 # Auto-merge
 if [[ $AUTO_MERGE_BRANCH ]]; then
 
+  # Record the current state
   git checkout -B temp
+  # Fetch and checkout the upstream branch
   git fetch gitlab_origin $AUTO_MERGE_BRANCH
-
-  git checkout $AUTO_MERGE_BRANCH
-  git reset --hard gitlab_origin/$AUTO_MERGE_BRANCH
+  git checkout --track gitlab_origin/$AUTO_MERGE_BRANCH
 
   MSG="Auto-merge $CI_COMMIT_REF_NAME into $AUTO_MERGE_BRANCH"
   echo $MSG
 
   set +e
-  git merge temp -m $MSG
+  git merge temp -m "$MSG"
   STATUS=$?
   set -e
 
