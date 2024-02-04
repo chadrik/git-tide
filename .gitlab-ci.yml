@@ -1,3 +1,5 @@
+default:
+  image: python:3.12
 
 .autotag_base:
   script:
