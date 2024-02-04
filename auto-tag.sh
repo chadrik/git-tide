@@ -3,7 +3,7 @@
 set -e
 
 get_tag() {
-  echo $(cz bump "$@" --dry-run --yes | grep tag | sed 's/tag to create: \(.*\)/\1/')
+  echo $(cz bump "$@" --dry-run | grep tag | sed 's/tag to create: \(.*\)/\1/')
 }
 
 pip install git+https://github.com/chadrik/commitizen@gitflow-test
@@ -15,8 +15,11 @@ echo "$CI_REPOSITORY_URL"
 
 git remote add gitlab_origin https://oauth2:$ACCESS_TOKEN@gitlab.com/chadrik/semver-demo.git
 
+git fetch gitlab_origin --tags
+echo "TAGS"
 git tag
-git fetch gitlab_origin $RELEASE_BRANCH_NAME
+echo ""
+
 
 tag=$(get_tag $TAG_ARGS)
 git tag "$tag"
