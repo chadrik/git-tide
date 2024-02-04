@@ -20,6 +20,8 @@ pip install -r requirements.txt
 
 git fetch gitlab_origin
 
+echo "pipeline source: $CI_PIPELINE_SOURCE"
+
 # Release time!
 # merge staging to master
 echo "Releasing develop to master!"
