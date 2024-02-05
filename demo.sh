@@ -21,7 +21,7 @@ git tag "1.0.0"
 git checkout -b develop
 cmtz version -p
 git commit --allow-empty -m "develop: Starting beta development for 1.1"
-git tag $(get_tag --prerelease beta --increment MINOR --force-prerelease)
+git tag $(get_tag --prerelease beta --increment MINOR --exact)
 
 # add a feature to develop
 touch src/feat1.txt
@@ -38,7 +38,7 @@ git tag $(get_tag --prerelease rc --increment PATCH)
 # add another feature to develop
 git checkout develop
 git commit --allow-empty -m "develop: Starting beta development for 1.2"
-git tag $(get_tag --prerelease beta --increment MINOR --force-prerelease)
+git tag $(get_tag --prerelease beta --increment MINOR --exact)
 
 touch src/feat2.txt
 git add src/feat2.txt
@@ -105,4 +105,4 @@ echo "Setting up new develop branch for beta development"
 git checkout develop
 #git merge staging -m "make new develop branch"
 git commit --allow-empty -m "develop: Starting beta development for 1.3"
-git tag $(get_tag --prerelease beta --increment MINOR --force-prerelease)
+git tag $(get_tag --prerelease beta --increment MINOR --exact)

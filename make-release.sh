@@ -33,12 +33,12 @@ git tag $RC_TAG
 # start a new beta cycle
 echo "Setting up new develop branch for beta development"
 git checkout --track gitlab_origin/develop
-BETA_TAG=$(get_tag --prerelease beta --increment MINOR --force-prerelease)
+BETA_TAG=$(get_tag --prerelease beta --increment MINOR --exact)
 git commit --allow-empty -m "Starting beta development for $(short_tag $BETA_TAG)"
 git tag $BETA_TAG
 
 # git push --atomic gitlab_origin master staging develop "$MASTER_TAG" "$RC_TAG" "$BETA_TAG" -o ci.skip
-# New tags should trigger release builds, but
+# FIXME: We want to trigger test/deploy jobs for these new versions, but we want to skip auto-merge
 git push --atomic gitlab_origin master "$MASTER_TAG" -o ci.skip
 git push --atomic gitlab_origin staging "$RC_TAG" -o ci.skip
 git push --atomic gitlab_origin develop "$BETA_TAG" -o ci.skip
