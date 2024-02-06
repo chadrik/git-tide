@@ -12,6 +12,14 @@ source ./ci-common.sh
 
 pip install -r requirements.txt
 
+if [[ $TARGET_BRANCH == "develop" ]]; then
+  PRE_RELEASE_TYPE="beta"
+elif [[ $TARGET_BRANCH == "staging" ]]; then
+  PRE_RELEASE_TYPE="rc"
+else
+  PRE_RELEASE_TYPE=""
+fi
+
 if [[ "$PRE_RELEASE_TYPE" ]]; then
   TAG_ARGS="--prerelease $PRE_RELEASE_TYPE --increment PATCH"
 else
