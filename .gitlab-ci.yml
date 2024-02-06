@@ -44,13 +44,11 @@ deploy-staging:
   extends: .deploy_base
   variables:
     TARGET_BRANCH: staging
-    PRE_RELEASE_TYPE: rc
 
 deploy-develop:
   extends: .deploy_base
   variables:
     TARGET_BRANCH: develop
-    PRE_RELEASE_TYPE: beta
 
 .automerge_base:
   stage: .post
@@ -66,13 +64,11 @@ merge-master-to-staging:
   extends: .automerge_base
   variables:
     TARGET_BRANCH: master
-    AUTO_MERGE_BRANCH: staging
 
 merge-staging-to-develop:
   extends: .automerge_base
   variables:
     TARGET_BRANCH: staging
-    AUTO_MERGE_BRANCH: develop
 
 make-release:
   stage: deploy
