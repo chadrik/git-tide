@@ -25,7 +25,7 @@ git tag $MASTER_TAG
 # start a new beta cycle
 echo "Setting up new develop branch for beta development"
 git checkout --track gitlab_origin/develop
-BETA_TAG=$(get_tag --prerelease beta --increment MINOR --exact)
+BETA_TAG=$(get_tag --prerelease beta --increment MINOR --increment-mode=exact)
 git commit --allow-empty -m "Starting beta development for $(short_tag $BETA_TAG)"
 git tag $BETA_TAG
 
