@@ -1,1 +1,2 @@
-git+https://github.com/chadrik/commitizen@gitflow-test
+# this version has my latest changes
+commitizen==3.16.0
