@@ -1,16 +1,29 @@
 #!/bin/bash
 set -e
 
+DIR="$( dirname -- "${BASH_SOURCE[0]}"; )";
+
+pip install -r $DIR/requirements.txt
+
 cmtz() {
-  PYTHONPATH=~/dev/commitizen python3.8 -m commitizen "$@"
+  # PYTHONPATH=~/dev/commitizen python3.8 -m commitizen "$@"
+  cz "$@"
 }
 
 get_tag() {
   echo $(cmtz bump "$@" --dry-run | grep tag | sed 's/tag to create: \(.*\)/\1/')
 }
 
-git checkout master
-git reset --hard demo
+if [[ -d .git ]]; then
+  git checkout master
+  git reset --hard demo
+else
+  git init
+
+  cp "$DIR/pyproject.toml" ./
+  git add pyproject.toml
+fi
+
 mkdir src || true
 touch src/base.txt
 git add src/base.txt
@@ -21,7 +34,7 @@ git tag "1.0.0"
 git checkout -b develop
 cmtz version -p
 git commit --allow-empty -m "develop: Starting beta development for 1.1"
-git tag $(get_tag --prerelease beta --increment MINOR --exact)
+git tag $(get_tag --prerelease beta --increment MINOR --increment-mode=exact)
 
 # add a feature to develop
 touch src/feat1.txt
@@ -38,7 +51,7 @@ git tag $(get_tag --prerelease rc --increment PATCH)
 # add another feature to develop
 git checkout develop
 git commit --allow-empty -m "develop: Starting beta development for 1.2"
-git tag $(get_tag --prerelease beta --increment MINOR --exact)
+git tag $(get_tag --prerelease beta --increment MINOR --increment-mode=exact)
 
 touch src/feat2.txt
 git add src/feat2.txt
@@ -98,11 +111,13 @@ git checkout staging
 git reset --hard develop
 #git merge develop -m "make new release candidate"
 git commit --allow-empty -m "staging: Starting release candidate for 1.2"
-git tag $(get_tag --prerelease rc --increment PATCH)
+get_tag --prerelease rc --increment PATCH
 
 # start a new beta cycle
 echo "Setting up new develop branch for beta development"
 git checkout develop
 #git merge staging -m "make new develop branch"
 git commit --allow-empty -m "develop: Starting beta development for 1.3"
-git tag $(get_tag --prerelease beta --increment MINOR --exact)
+get_tag --prerelease beta --increment MINOR --increment-mode=exact
+
+git log --graph --abbrev-commit --decorate --format=format:'%C(bold blue)%h%C(reset) - %C(bold green)(%ar)%C(reset) %C(white)%s%C(reset) %C(dim white)- %an%C(reset)%C(auto)%d%C(reset)' --all
