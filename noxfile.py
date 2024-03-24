@@ -130,6 +130,7 @@ def ci_automerge(session: nox.Session):
 
     checkout(remote, upstream_branch)
 
+    # FIXME: use commit short message in new message
     msg = f"Auto-merge {branch} into {upstream_branch}"
     session.log(msg)
 
@@ -191,4 +192,4 @@ def ci_release(session: nox.Session):
         # FIXME: We want to trigger test/deploy jobs for these new versions, but we want to skip auto-merge
         git("push", "--atomic", remote, "master", master_tag, "-o=ci.skip")
         git("push", "--atomic", remote, "staging", rc_tag, "-o=ci.skip")
-        git("push", "--atomic", remote, "develop", beta_tag, "-o ci.skip")
+        git("push", "--atomic", remote, "develop", beta_tag, "-o=ci.skip")
