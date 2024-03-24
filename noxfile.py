@@ -18,8 +18,13 @@ def git(*args, **kwargs) -> subprocess.CompletedProcess[str]:
 
 
 def current_branch() -> str:
-    result = git("branch", "--show-current", stdout=subprocess.PIPE)
-    return result.stdout.strip()
+    try:
+        return os.environ["CI_COMMIT_BRANCH"]
+    except KeyError:
+        result = git("branch", "--show-current", stdout=subprocess.PIPE)
+        branch = result.stdout.strip()
+        assert branch
+        return branch
 
 
 def checkout(remote, branch):
