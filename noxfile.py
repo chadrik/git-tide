@@ -171,7 +171,10 @@ def ci_release(session: nox.Session):
         upstream_branch = get_upstream_branch(session, branch)
         if upstream_branch:
             git("merge", join(remote, upstream_branch), "-m", f"Release {upstream_branch} to {branch}")
-        tag = get_tag_for_branch(session, branch)
+            increment = "patch"
+        else:
+            increment = "minor"
+        tag = get_tag_for_branch(session, branch, increment=increment)
         git("commit", "--allow-empty", "-m", f"{release_msg} {short_version(tag)}")
         git("tag", tag)
         refs.extend([branch, tag])
