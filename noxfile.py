@@ -100,9 +100,10 @@ def ci_autotag(session: nox.Session):
 
     # Auto-tag
     tag = get_tag_for_branch(session, branch)
-    print(f"Creating new tag {tag}")
+    session.log(f"Creating new tag {tag}")
     git("tag", tag)
     if remote:
+        session.log(f"Pushing {tag} to {remote}")
         git("push", remote, tag, "-o=ci.skip")
 
 
@@ -112,6 +113,7 @@ def ci_automerge(session: nox.Session):
     branch = current_branch()
     upstream_branch = get_upstream_branch(branch)
     if not upstream_branch:
+        session.log(f"No branch upstream from {branch}. Skipping auto-merge")
         return
 
     # Auto-merge
@@ -119,25 +121,27 @@ def ci_automerge(session: nox.Session):
     git("checkout", "-B", f"{branch}_temp")
 
     if remote:
-        # Fetch and checkout the upstream branch
+        # Fetch the upstream branch
         git("fetch", remote, upstream_branch)
 
     checkout(remote, upstream_branch)
 
     msg = f"Auto-merge {branch} into {upstream_branch}"
-    print(msg)
+    session.log(msg)
 
     try:
         git("merge", f"{branch}_temp", "-m", msg)
     except subprocess.CalledProcessError:
-        print("Conflicts:")
+        session.warn("Conflicts:")
         git("diff", "--name-only", "--diff-filter=U")
         raise
 
     if remote:
         # this will trigger a full pipeline for upstream_branch, and potentially another auto-merge
+        session.log(f"Pushing {upstream_branch} to {remote}")
         git("push", remote, upstream_branch)
     else:
+        # local mode: restore
         git("checkout", branch)
         git("branch", "-D", f"{branch}_temp")
 
@@ -156,7 +160,7 @@ def ci_release(session: nox.Session):
 
     # Release time!
     # merge staging to master
-    print("Releasing staging to master!")
+    session.log("Releasing staging to master!")
     checkout(remote, "master")
     git("merge", join(remote, "staging"), "-m", "Release staging to master")
     master_tag = get_tag_for_branch(session, "master")
@@ -164,14 +168,14 @@ def ci_release(session: nox.Session):
     git("tag", master_tag)
 
     # start a new beta cycle
-    print("Setting up new develop branch for beta development")
+    session.log("Setting up new develop branch for beta development")
     checkout(remote, "develop")
     beta_tag = get_tag_for_branch(session, "develop")
     git("commit", "--allow-empty", "-m", f"Starting beta development for {short_version(beta_tag)}")
     git("tag", beta_tag)
 
     # develop becomes release candidate
-    print("Converting develop branch into release candidate")
+    session.log("Converting develop branch into release candidate")
     checkout(remote, "staging")
     git("merge", join(remote, "develop"), "-m", "Release develop to staging")
     rc_tag = get_tag_for_branch(session, "staging")
