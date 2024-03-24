@@ -130,6 +130,7 @@ def ci_automerge(session: nox.Session):
 
     checkout(remote, upstream_branch)
 
+    # FIXME: use commit short message in new message
     msg = f"Auto-merge {branch} into {upstream_branch}"
     session.log(msg)
 
@@ -162,33 +163,30 @@ def ci_release(session: nox.Session):
     if remote:
         git("fetch", remote)
 
+    refs = []
+
+    def cascade(branch: str, log_msg: str, release_msg: str):
+        session.log(log_msg)
+        checkout(remote, branch)
+        upstream_branch = get_upstream_branch(session, branch)
+        if upstream_branch:
+            git("merge", join(remote, upstream_branch), "-m", f"Release {upstream_branch} to {branch}")
+        tag = get_tag_for_branch(session, branch)
+        git("commit", "--allow-empty", "-m", f"{release_msg} {short_version(tag)}")
+        git("tag", tag)
+        refs.extend([branch, tag])
+
     # Release time!
-    # merge staging to master
-    session.log("Releasing staging to master!")
-    checkout(remote, "master")
-    git("merge", join(remote, "staging"), "-m", "Release staging to master")
-    master_tag = get_tag_for_branch(session, "master")
-    git("commit", "--allow-empty", "-m", f"New release! {short_version(master_tag)}")
-    git("tag", master_tag)
-
-    # start a new beta cycle
-    session.log("Setting up new develop branch for beta development")
-    checkout(remote, "develop")
-    beta_tag = get_tag_for_branch(session, "develop")
-    git("commit", "--allow-empty", "-m", f"Starting beta development for {short_version(beta_tag)}")
-    git("tag", beta_tag)
-
-    # develop becomes release candidate
-    session.log("Converting develop branch into release candidate")
-    checkout(remote, "staging")
-    git("merge", join(remote, "develop"), "-m", "Release develop to staging")
-    rc_tag = get_tag_for_branch(session, "staging")
-    git("commit", "--allow-empty", "-m", f"Starting release candidate for {short_version(rc_tag)}")
-    git("tag", rc_tag)
+    cascade("master",
+            "Releasing staging to master!",
+            "New release!")
+    cascade("staging",
+            "Converting develop branch into release candidate",
+            "Starting release candidate for")
+    cascade("develop",
+            "Setting new develop branch for beta development",
+            "Starting beta development for")
 
     if remote:
-        # git push --atomic gitlab_origin master staging develop "$MASTER_TAG" "$RC_TAG" "$BETA_TAG" -o ci.skip
         # FIXME: We want to trigger test/deploy jobs for these new versions, but we want to skip auto-merge
-        git("push", "--atomic", remote, "master", master_tag, "-o=ci.skip")
-        git("push", "--atomic", remote, "staging", rc_tag, "-o=ci.skip")
-        git("push", "--atomic", remote, "develop", beta_tag, "-o ci.skip")
+        git(*(["push", "--atomic", remote] + refs + ["-o=ci.skip"]))
