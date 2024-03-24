@@ -40,10 +40,13 @@ def _get_tag(session: nox.Session, *args: str) -> str:
     return re.search('tag to create: (.*)', output).groups()[0]
 
 
-def get_upstream_branch(branch) -> str | None:
-    index = BRANCHES.index(branch)
+def get_upstream_branch(session: nox.Session, branch: str) -> str | None:
+    try:
+        index = BRANCHES.index(branch)
+    except ValueError:
+        session.error(f"Invalid branch: {branch}")
     index -= 1
-    if index > 0:
+    if index >= 0:
         return BRANCHES[index]
     return None
 
@@ -71,13 +74,14 @@ def join(remote: str | None, branch: str) -> str:
         return branch
 
 
-def _ci_setup_remote() -> str | None:
+def get_remote() -> str | None:
     try:
         url = os.environ["CI_REPOSITORY_URL"]
     except KeyError:
+        # return None to indicate we're not in CI mode.  would be safer to make this explicit!
         return None
 
-    branch = "gitlab_origin"
+    remote = "gitlab_origin"
     try:
         access_token = os.environ["ACCESS_TOKEN"]
     except KeyError:
@@ -88,14 +92,14 @@ def _ci_setup_remote() -> str | None:
     git("config", "user.email", "fake@email.com")
     git("config", "user.name", "ci-bot")
     url = url.split("@")[-1]
-    git("remote", "add", branch, f"https://oauth2:{access_token}@{url}")
-    return branch
+    git("remote", "add", remote, f"https://oauth2:{access_token}@{url}")
+    return remote
 
 
-@nox.session
+@nox.session(tags=["ci"])
 def ci_autotag(session: nox.Session):
     session.install("-r", "requirements.txt")
-    remote = _ci_setup_remote()
+    remote = get_remote()
     branch = current_branch()
 
     # Auto-tag
@@ -107,11 +111,11 @@ def ci_autotag(session: nox.Session):
         git("push", remote, tag, "-o=ci.skip")
 
 
-@nox.session
+@nox.session(tags=["ci"])
 def ci_automerge(session: nox.Session):
-    remote = _ci_setup_remote()
+    remote = get_remote()
     branch = current_branch()
-    upstream_branch = get_upstream_branch(branch)
+    upstream_branch = get_upstream_branch(session, branch)
     if not upstream_branch:
         session.log(f"No branch upstream from {branch}. Skipping auto-merge")
         return
@@ -146,7 +150,7 @@ def ci_automerge(session: nox.Session):
         git("branch", "-D", f"{branch}_temp")
 
 
-@nox.session
+@nox.session(tags=["ci"])
 def ci_release(session: nox.Session):
 
     def short_version(tag):
@@ -154,7 +158,7 @@ def ci_release(session: nox.Session):
 
     session.install("-r", "requirements.txt")
 
-    remote = _ci_setup_remote()
+    remote = get_remote()
     if remote:
         git("fetch", remote)
 
