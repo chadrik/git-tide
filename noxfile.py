@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import nox
+from dataclasses import dataclass
 
 BRANCHES = ["develop", "staging", "master"]
 BRANCH_TO_PRERELEASE = {
@@ -11,6 +12,36 @@ BRANCH_TO_PRERELEASE = {
     "staging": "rc",
     "develop": "beta",
 }
+
+
+@dataclass
+class Branch:
+    name: str
+    pre_release: str | None
+    downstream_branch: str | None
+    release_message: str
+
+
+# BRANCHES = [
+#     Branch(
+#         name="develop",
+#         pre_release="beta",
+#         downstream_branch="staging",
+#         release_message="Starting beta development for",
+#     ),
+#     Branch(
+#         name="staging",
+#         pre_release="rc",
+#         downstream_branch="master",
+#         release_message="Starting release candidate for",
+#     ),
+#     Branch(
+#         name="master",
+#         pre_release=None,
+#         downstream_branch=None,
+#         release_message="New release!",
+#     ),
+# ]
 
 
 def git(*args, **kwargs) -> subprocess.CompletedProcess[str]:
@@ -98,12 +129,13 @@ def get_remote() -> str | None:
 
 @nox.session(tags=["ci"])
 def ci_autotag(session: nox.Session):
+    increment = os.environ.get("AUTOPILOT_INCREMENT", "patch")
     session.install("-r", "requirements.txt")
     remote = get_remote()
     branch = current_branch()
 
     # Auto-tag
-    tag = get_tag_for_branch(session, branch)
+    tag = get_tag_for_branch(session, branch, increment=increment)
     session.log(f"Creating new tag {tag}")
     git("tag", tag)
     if remote:
@@ -113,6 +145,9 @@ def ci_autotag(session: nox.Session):
 
 @nox.session(tags=["ci"])
 def ci_automerge(session: nox.Session):
+    if os.environ.get("AUTOPILOT_SKIP_AUTOMERGE", "").lower() in ["1", "true"]:
+        return
+
     remote = get_remote()
     branch = current_branch()
     upstream_branch = get_upstream_branch(session, branch)
@@ -122,6 +157,7 @@ def ci_automerge(session: nox.Session):
 
     # Auto-merge
     # Record the current state
+    msg = git("log", "--pretty=format: %s",  "-1", stdout=subprocess.PIPE)
     git("checkout", "-B", f"{branch}_temp")
 
     if remote:
@@ -131,7 +167,7 @@ def ci_automerge(session: nox.Session):
     checkout(remote, upstream_branch)
 
     # FIXME: use commit short message in new message
-    msg = f"Auto-merge {branch} into {upstream_branch}"
+    msg = f"Auto-merge into {upstream_branch}: {msg}"
     session.log(msg)
 
     try:
@@ -163,8 +199,6 @@ def ci_release(session: nox.Session):
     if remote:
         git("fetch", remote)
 
-    refs = []
-
     def cascade(branch: str, log_msg: str, release_msg: str):
         session.log(log_msg)
         checkout(remote, branch)
@@ -174,10 +208,17 @@ def ci_release(session: nox.Session):
             increment = "patch"
         else:
             increment = "minor"
+
+        # Get the tag for informational purposes only. Tagging will be triggered by push.
         tag = get_tag_for_branch(session, branch, increment=increment)
         git("commit", "--allow-empty", "-m", f"{release_msg} {short_version(tag)}")
-        git("tag", tag)
-        refs.extend([branch, tag])
+        if remote:
+            # Trigger test/deploy jobs for these new versions, but skip auto-merge
+            git(
+                "push", "--atomic", remote, branch,
+                "-o", f'ci.variable=AUTOPILOT_INCREMENT="{increment}"',
+                "-o", 'ci.variable=AUTOPILOT_SKIP_AUTOMERGE="true"',
+            )
 
     # Release time!
     cascade("master",
@@ -189,7 +230,3 @@ def ci_release(session: nox.Session):
     cascade("develop",
             "Setting new develop branch for beta development",
             "Starting beta development for")
-
-    if remote:
-        # FIXME: We want to trigger test/deploy jobs for these new versions, but we want to skip auto-merge
-        git(*(["push", "--atomic", remote] + refs + ["-o=ci.skip"]))
