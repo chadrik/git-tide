@@ -27,7 +27,7 @@ def current_branch() -> str:
         return branch
 
 
-def checkout(remote, branch):
+def checkout(remote: str | None, branch: str) -> None:
     args = ["checkout"]
     if remote:
         args += ["--track"]
@@ -35,8 +35,8 @@ def checkout(remote, branch):
     git(*args)
 
 
-def _get_tag(session: nox.Session, *args) -> str:
-    output = session.run(*(["cz", "bump"] + list(args) + ["--dry-run"]))
+def _get_tag(session: nox.Session, *args: str) -> str:
+    output = session.run(*(["cz", "bump"] + list(args) + ["--dry-run"]), silent=True)
     return re.search('tag to create: (.*)', output).groups()[0]
 
 
