@@ -29,7 +29,7 @@ test:
   script:
    - echo "Deploying $TARGET_BRANCH!"
    - pip install nox
-   - nox -s ci_autotag
+   - nox -s ci_autotag --force-color
   # releases must be performed serially, in order
   resource_group: "$TARGET_BRANCH"
   rules:
@@ -59,7 +59,7 @@ deploy-develop:
   allow_failure: true
   script:
    - pip install nox
-   - nox -s ci_automerge
+   - nox -s ci_automerge --force-color
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
@@ -79,7 +79,7 @@ make-release:
   stage: deploy
   script:
    - pip install nox
-   - nox -s ci_release
+   - nox -s ci_release --force-color
   rules:
     # add option to manually run release on staging pipelines: will convert the latest version on staging to a release
     - if: $CI_COMMIT_BRANCH == "staging" && $CI_PIPELINE_SOURCE != "schedule" && $CI_PIPELINE_SOURCE == "push"
