@@ -26,8 +26,8 @@ test:
 
 .deploy_base:
   stage: deploy
-  script: echo "Deploying $TARGET_BRANCH!"
-  after_script:
+  script:
+   - echo "Deploying $TARGET_BRANCH!"
    - pip install nox
    - nox -s ci_autotag
   # releases must be performed serially, in order
