@@ -1,16 +1,33 @@
 #!/bin/bash
 set -e
 
+DIR="$( dirname -- "${BASH_SOURCE[0]}"; )";
+
+pip install -r $DIR/requirements.txt
+
 cmtz() {
-  PYTHONPATH=~/dev/commitizen python3.8 -m commitizen "$@"
+  # PYTHONPATH=~/dev/commitizen python3.8 -m commitizen "$@"
+  cz "$@"
 }
 
 get_tag() {
   echo $(cmtz bump "$@" --dry-run | grep tag | sed 's/tag to create: \(.*\)/\1/')
 }
 
-git checkout master
-git reset --hard demo
+if [[ -d .git ]]; then
+  git checkout master
+  git reset --hard demo
+else
+  git init
+
+  cp "$DIR/pyproject.toml" ./
+  cp "$DIR/noxfile.py" ./
+  cp "$DIR/requirements.txt" ./
+  git add pyproject.toml
+  git add noxfile.py
+  git add requirements.txt
+fi
+
 mkdir src || true
 touch src/base.txt
 git add src/base.txt
@@ -21,7 +38,7 @@ git tag "1.0.0"
 git checkout -b develop
 cmtz version -p
 git commit --allow-empty -m "develop: Starting beta development for 1.1"
-git tag $(get_tag --prerelease beta --increment MINOR --exact)
+git tag $(get_tag --prerelease beta --increment MINOR --increment-mode=exact)
 
 # add a feature to develop
 touch src/feat1.txt
@@ -38,71 +55,40 @@ git tag $(get_tag --prerelease rc --increment PATCH)
 # add another feature to develop
 git checkout develop
 git commit --allow-empty -m "develop: Starting beta development for 1.2"
-git tag $(get_tag --prerelease beta --increment MINOR --exact)
+git tag $(get_tag --prerelease beta --increment MINOR --increment-mode=exact)
 
 touch src/feat2.txt
 git add src/feat2.txt
 git commit -m "develop: add beta feature2"
-git tag $(get_tag --prerelease beta --increment PATCH)
+nox -s ci_autotag
 
 # add a hotfix to master
 git checkout master
 touch src/fix.txt
 git add src/fix.txt
 git commit -m "master: add hotfix"
-git tag $(get_tag --increment PATCH)
+nox -s ci_autotag
 
 # merge the hotfix to staging
-git checkout staging
-git merge master -m "staging: auto-merge hotfix from master"
-git tag $(get_tag --prerelease rc --increment PATCH)
+nox -s ci_automerge
+nox -s ci_autotag
 
 # merge the hotfix to develop
-git checkout develop
-git merge staging -m "develop: auto-merge hotfix from staging"
-git tag $(get_tag --prerelease beta --increment PATCH)
+nox -s ci_automerge
+nox -s ci_autotag
 
 # add a feature fix to staging
 git checkout staging
 echo "more awesome" >> src/feat1.txt
 git add src/feat1.txt
 git commit -m "staging: update beta feature"
-git tag $(get_tag --prerelease rc --increment PATCH)
+nox -s ci_autotag
 
 # merge the hotfix to develop
-git checkout develop
-git merge staging -m "develop: auto-merge rc hotfix from staging"
-git tag $(get_tag --prerelease beta --increment PATCH)
+nox -s ci_automerge
+nox -s ci_autotag
 
-# Release time!
-# merge staging to master
-echo "Releasing develop to master!"
-git checkout master
-git merge staging -m "Release develop to master"
-git commit --allow-empty -m "New release! 1.1"
-git tag $(get_tag --increment PATCH)
+nox -s ci_release
 
-## merge the hotfix to staging
-#git checkout staging
-#git merge master -m "auto-merge hotfix from master into staging"
-#git_tag --prerelease rc --increment PATCH
-#
-## merge the hotfix to develop
-#git checkout develop
-#git merge staging -m "auto-merge hotfix from staging into develop"
-#git_tag --prerelease beta --increment PATCH
-
-# develop becomes release candidate
-echo "Converting develop branch into release candidate"
-git checkout staging
-git reset --hard develop
-#git merge develop -m "make new release candidate"
-git commit --allow-empty -m "staging: Starting release candidate for 1.2"
-git tag $(get_tag --prerelease rc --increment PATCH)
-
-# start a new beta cycle
-echo "Setting up new develop branch for beta development"
-git checkout develop
-#git merge staging -m "make new develop branch"
-git commit --allow-empty -m "develop: Starting beta development for 1.3"
-git tag $(get_tag --prerelease beta --increment MINOR --exact)
+git log --graph --abbrev-commit --decorate --format=format:'%C(white)%s%C(reset) %C(dim white)-%C(auto)%d%C(reset)' --all
+# git log --graph --abbrev-commit --decorate --format=format:'%C(bold blue)%h%C(reset) - %C(bold green)(%ar)%C(reset) %C(white)%s%C(reset) %C(dim white)- %an%C(reset)%C(auto)%d%C(reset)' --all

@@ -26,8 +26,10 @@ test:
 
 .deploy_base:
   stage: deploy
-  script: echo "Deploying $TARGET_BRANCH!"
-  after_script: ./auto-tag.sh
+  script:
+   - echo "Deploying $TARGET_BRANCH!"
+   - pip install nox
+   - nox -s ci_autotag --force-color
   # releases must be performed serially, in order
   resource_group: "$TARGET_BRANCH"
   rules:
@@ -51,10 +53,13 @@ deploy-develop:
     TARGET_BRANCH: develop
 
 .automerge_base:
+  # always runs last
   stage: .post
   # it's ok if auto-merge does not succeed
   allow_failure: true
-  script: ./auto-merge.sh
+  script:
+   - pip install nox
+   - nox -s ci_automerge --force-color
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
@@ -72,10 +77,12 @@ merge-staging-to-develop:
 
 make-release:
   stage: deploy
-  script: ./make-release.sh
+  script:
+   - pip install nox
+   - nox -s ci_release --force-color
   rules:
-    # add to staging, because it will convert the latest version on staging to a release
-    - if: $CI_PIPELINE_SOURCE != "schedule" && $CI_COMMIT_BRANCH == "staging" && $CI_PIPELINE_SOURCE == "push"
+    # add option to manually run release on staging pipelines: will convert the latest version on staging to a release
+    - if: $CI_COMMIT_BRANCH == "staging" && $CI_PIPELINE_SOURCE != "schedule" && $CI_PIPELINE_SOURCE == "push"
       when: manual
       # allow_failure: true is required to prevent this job from blocking the pipeline.
       # Feature request: https://gitlab.com/gitlab-org/gitlab/-/issues/28036
