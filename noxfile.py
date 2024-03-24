@@ -27,7 +27,7 @@ def current_branch() -> str:
         return branch
 
 
-def checkout(remote, branch):
+def checkout(remote: str | None, branch: str) -> None:
     args = ["checkout"]
     if remote:
         args += ["--track"]
@@ -35,8 +35,8 @@ def checkout(remote, branch):
     git(*args)
 
 
-def _get_tag(*args) -> str:
-    output = subprocess.check_output(["cz", "bump"] + list(args) + ["--dry-run"], text=True)
+def _get_tag(session: nox.Session, *args: str) -> str:
+    output = session.run(*(["cz", "bump"] + list(args) + ["--dry-run"]), silent=True)
     return re.search('tag to create: (.*)', output).groups()[0]
 
 
@@ -48,7 +48,7 @@ def get_upstream_branch(branch) -> str | None:
     return None
 
 
-def get_tag_for_branch(branch, increment="patch") -> str:
+def get_tag_for_branch(session, branch, increment="patch") -> str:
     prerelease = BRANCH_TO_PRERELEASE[branch]
     if prerelease:
         args = ["--prerelease", prerelease]
@@ -61,7 +61,7 @@ def get_tag_for_branch(branch, increment="patch") -> str:
         args += ["--increment=MINOR", "--increment-mode=exact"]
     else:
         raise TypeError(increment)
-    return _get_tag(*args)
+    return _get_tag(session, *args)
 
 
 def join(remote: str | None, branch: str) -> str:
@@ -99,7 +99,7 @@ def ci_autotag(session: nox.Session):
     branch = current_branch()
 
     # Auto-tag
-    tag = get_tag_for_branch(branch)
+    tag = get_tag_for_branch(session, branch)
     print(f"Creating new tag {tag}")
     git("tag", tag)
     if remote:
@@ -159,14 +159,14 @@ def ci_release(session: nox.Session):
     print("Releasing staging to master!")
     checkout(remote, "master")
     git("merge", join(remote, "staging"), "-m", "Release staging to master")
-    master_tag = get_tag_for_branch("master")
+    master_tag = get_tag_for_branch(session, "master")
     git("commit", "--allow-empty", "-m", f"New release! {short_version(master_tag)}")
     git("tag", master_tag)
 
     # start a new beta cycle
     print("Setting up new develop branch for beta development")
     checkout(remote, "develop")
-    beta_tag = get_tag_for_branch("develop")
+    beta_tag = get_tag_for_branch(session, "develop")
     git("commit", "--allow-empty", "-m", f"Starting beta development for {short_version(beta_tag)}")
     git("tag", beta_tag)
 
@@ -174,7 +174,7 @@ def ci_release(session: nox.Session):
     print("Converting develop branch into release candidate")
     checkout(remote, "staging")
     git("merge", join(remote, "develop"), "-m", "Release develop to staging")
-    rc_tag = get_tag_for_branch("staging")
+    rc_tag = get_tag_for_branch(session, "staging")
     git("commit", "--allow-empty", "-m", f"Starting release candidate for {short_version(rc_tag)}")
     git("tag", rc_tag)
 
