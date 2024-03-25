@@ -141,7 +141,7 @@ def ci_autotag(session: nox.Session):
 
 @nox.session(tags=["ci"])
 def ci_automerge(session: nox.Session):
-    if os.environ.get("AUTOPILOT_SKIP_AUTOMERGE", "").lower() in ["1", "true"]:
+    if os.environ.get("AUTOPILOT_SKIP_AUTOMERGE", "").lower() in ("1", "true"):
         return
 
     remote = get_remote()
