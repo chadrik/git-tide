@@ -216,8 +216,8 @@ def ci_release(session: nox.Session):
             # Trigger test/deploy jobs for these new versions, but skip auto-merge
             git(
                 "push", "--atomic", remote, branch,
-                "-o", f'ci.variable=AUTOPILOT_INCREMENT="{increment}"',
-                "-o", 'ci.variable=AUTOPILOT_SKIP_AUTOMERGE="true"',
+                "-o", f"ci.variable=AUTOPILOT_INCREMENT={increment}",
+                "-o", "ci.variable=AUTOPILOT_SKIP_AUTOMERGE=true",
             )
 
     # Release time!
