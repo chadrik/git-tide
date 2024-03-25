@@ -63,7 +63,7 @@ deploy-develop:
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
-    - if: $CI_COMMIT_BRANCH == $TARGET_BRANCH
+    - if: $CI_COMMIT_BRANCH == $TARGET_BRANCH && $AUTOPILOT_SKIP_AUTOMERGE != "true"
 
 merge-master-to-staging:
   extends: .automerge_base
