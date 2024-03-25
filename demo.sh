@@ -74,6 +74,7 @@ nox -s ci_automerge
 nox -s ci_autotag
 
 # merge the hotfix to develop
+git checkout staging
 nox -s ci_automerge
 nox -s ci_autotag
 
