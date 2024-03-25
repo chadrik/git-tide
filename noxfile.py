@@ -66,11 +66,6 @@ def checkout(remote: str | None, branch: str) -> None:
     git(*args)
 
 
-def _get_tag(session: nox.Session, *args: str) -> str:
-    output = session.run(*(["cz", "bump"] + list(args) + ["--dry-run"]), silent=True)
-    return re.search('tag to create: (.*)', output).groups()[0]
-
-
 def get_upstream_branch(session: nox.Session, branch: str) -> str | None:
     try:
         index = BRANCHES.index(branch)
@@ -95,7 +90,8 @@ def get_tag_for_branch(session, branch, increment="patch") -> str:
         args += ["--increment=MINOR", "--increment-mode=exact"]
     else:
         raise TypeError(increment)
-    return _get_tag(session, *args)
+    output = session.run(*(["cz", "bump"] + list(args) + ["--dry-run"]), silent=True)
+    return re.search('tag to create: (.*)', output).groups()[0]
 
 
 def join(remote: str | None, branch: str) -> str:
@@ -166,7 +162,6 @@ def ci_automerge(session: nox.Session):
 
     checkout(remote, upstream_branch)
 
-    # FIXME: use commit short message in new message
     msg = f"Auto-merge into {upstream_branch}: {msg}"
     session.log(msg)
 
