@@ -157,7 +157,7 @@ def ci_automerge(session: nox.Session):
 
     # Auto-merge
     # Record the current state
-    msg = git("log", "--pretty=format: %s",  "-1", stdout=subprocess.PIPE)
+    msg = git("log", "--pretty=format: %s",  "-1", stdout=subprocess.PIPE).stdout
     git("checkout", "-B", f"{branch}_temp")
 
     if remote:
