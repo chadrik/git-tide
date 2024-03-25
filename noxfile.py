@@ -6,6 +6,7 @@ import subprocess
 import nox
 from dataclasses import dataclass
 
+AUTO_MERGE_MESSAGE = "Auto-merge into {upstream_branch}: {message}"
 BRANCHES = ["develop", "staging", "master"]
 BRANCH_TO_PRERELEASE = {
     "master": None,
@@ -27,19 +28,19 @@ class Branch:
 #         name="develop",
 #         pre_release="beta",
 #         downstream_branch="staging",
-#         release_message="Starting beta development for",
+#         release_message="Starting beta development for {short_tag}",
 #     ),
 #     Branch(
 #         name="staging",
 #         pre_release="rc",
 #         downstream_branch="master",
-#         release_message="Starting release candidate for",
+#         release_message="Starting release candidate for {short_tag}",
 #     ),
 #     Branch(
 #         name="master",
 #         pre_release=None,
 #         downstream_branch=None,
-#         release_message="New release!",
+#         release_message="New release! {short_tag}",
 #     ),
 # ]
 
@@ -141,6 +142,7 @@ def ci_autotag(session: nox.Session):
 
 @nox.session(tags=["ci"])
 def ci_automerge(session: nox.Session):
+    # FIXME: remove this, should be unnecessary
     if os.environ.get("AUTOPILOT_SKIP_AUTOMERGE", "").lower() in ("1", "true"):
         return
 
@@ -153,7 +155,12 @@ def ci_automerge(session: nox.Session):
 
     # Auto-merge
     # Record the current state
-    msg = git("log", "--pretty=format: %s",  "-1", stdout=subprocess.PIPE).stdout
+    message = git("log", "--pretty=format: %s",  "-1", stdout=subprocess.PIPE).stdout.strip()
+    # strip out previous Automerge formatting
+    match = re.match(AUTO_MERGE_MESSAGE.format(upstream_branch="[^:]+", message="(.*)$"), message)
+    if match:
+        message = match.groups()[0]
+
     git("checkout", "-B", f"{branch}_temp")
 
     if remote:
@@ -162,7 +169,7 @@ def ci_automerge(session: nox.Session):
 
     checkout(remote, upstream_branch)
 
-    msg = f"Auto-merge into {upstream_branch}: {msg}"
+    msg = AUTO_MERGE_MESSAGE.format(upstream_branch=upstream_branch, message=message)
     session.log(msg)
 
     try:
