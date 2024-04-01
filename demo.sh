@@ -14,19 +14,14 @@ get_tag() {
   echo $(cmtz bump "$@" --dry-run | grep tag | sed 's/tag to create: \(.*\)/\1/')
 }
 
-if [[ -d .git ]]; then
-  git checkout master
-  git reset --hard demo
-else
-  git init
+git init
 
-  cp "$DIR/pyproject.toml" ./
-  cp "$DIR/noxfile.py" ./
-  cp "$DIR/requirements.txt" ./
-  git add pyproject.toml
-  git add noxfile.py
-  git add requirements.txt
-fi
+cp "$DIR/pyproject.toml" ./
+cp "$DIR/noxfile.py" ./
+cp "$DIR/requirements.txt" ./
+git add pyproject.toml
+git add noxfile.py
+git add requirements.txt
 
 mkdir src || true
 touch src/base.txt
@@ -34,28 +29,24 @@ git add src/base.txt
 git commit -m "master: initial state"
 git tag "1.0.0"
 
-# create develop
-git checkout -b develop
-cmtz version -p
-git commit --allow-empty -m "develop: Starting beta development for 1.1"
-git tag $(get_tag --prerelease beta --increment MINOR --increment-mode=exact)
+nox -s ci_release
+git checkout develop
+# skip autotag for master/staging, bc master is still at 1.0.0, and staging doesn't exist yet
+AUTOPILOT_INCREMENT="minor" nox -s ci_autotag
 
 # add a feature to develop
+git checkout develop
 touch src/feat1.txt
 git add src/feat1.txt
 git commit -m "develop: add beta feature1"
-git tag $(get_tag --prerelease beta)
+nox -s ci_autotag
 
-# create staging
-git checkout -b staging
-cmtz version -p
-git commit --allow-empty -m "staging: Starting release candidate for 1.1"
-git tag $(get_tag --prerelease rc --increment PATCH)
-
-# add another feature to develop
+nox -s ci_release
+# skip autotag for master, bc it's still at 1.0.0
+git checkout staging
+AUTOPILOT_INCREMENT="patch" nox -s ci_autotag
 git checkout develop
-git commit --allow-empty -m "develop: Starting beta development for 1.2"
-git tag $(get_tag --prerelease beta --increment MINOR --increment-mode=exact)
+AUTOPILOT_INCREMENT="minor" nox -s ci_autotag
 
 touch src/feat2.txt
 git add src/feat2.txt
@@ -74,7 +65,6 @@ nox -s ci_automerge
 nox -s ci_autotag
 
 # merge the hotfix to develop
-git checkout staging
 nox -s ci_automerge
 nox -s ci_autotag
 
