@@ -59,8 +59,15 @@ def current_branch() -> str:
         return branch
 
 
-def checkout(remote: str | None, branch: str) -> None:
+def get_branches() -> list[str]:
+    result = git("branch", stdout=subprocess.PIPE)
+    return [x.split()[-1] for x in result.stdout.splitlines()]
+
+
+def checkout(remote: str | None, branch: str, create=False) -> None:
     args = ["checkout"]
+    if create:
+        args += ["-b"]
     if remote:
         args += ["--track"]
     args += [join(remote, branch)]
@@ -126,6 +133,7 @@ def get_remote() -> str | None:
 
 @nox.session(tags=["ci"])
 def ci_autotag(session: nox.Session):
+    # FIXME: replace with argparse
     increment = os.environ.get("AUTOPILOT_INCREMENT", "patch")
     session.install("-r", "requirements.txt")
     remote = get_remote()
@@ -142,10 +150,6 @@ def ci_autotag(session: nox.Session):
 
 @nox.session(tags=["ci"])
 def ci_automerge(session: nox.Session):
-    # FIXME: remove this, should be unnecessary
-    if os.environ.get("AUTOPILOT_SKIP_AUTOMERGE", "").lower() in ("1", "true"):
-        return
-
     remote = get_remote()
     branch = current_branch()
     upstream_branch = get_upstream_branch(session, branch)
@@ -184,8 +188,7 @@ def ci_automerge(session: nox.Session):
         session.log(f"Pushing {upstream_branch} to {remote}")
         git("push", remote, upstream_branch)
     else:
-        # local mode: restore
-        git("checkout", branch)
+        # local mode: cleanup
         git("branch", "-D", f"{branch}_temp")
 
 
@@ -201,10 +204,16 @@ def ci_release(session: nox.Session):
     if remote:
         git("fetch", remote)
 
+    all_branches = get_branches()
+
     def cascade(branch: str, log_msg: str, release_msg: str):
         session.log(log_msg)
-        checkout(remote, branch)
         upstream_branch = get_upstream_branch(session, branch)
+        # FIXME: raise an error by default if branch does not exist?  provide option to allow this only during bootstrapping/testing
+        if upstream_branch and upstream_branch not in all_branches:
+            return
+
+        checkout(remote, branch, create=branch not in all_branches)
         if upstream_branch:
             git("merge", join(remote, upstream_branch), "-m", f"Release {upstream_branch} to {branch}")
             increment = "patch"
