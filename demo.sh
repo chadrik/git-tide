@@ -32,7 +32,7 @@ git tag "1.0.0"
 nox -s ci_release
 git checkout develop
 # skip autotag for master/staging, bc master is still at 1.0.0, and staging doesn't exist yet
-AUTOPILOT_INCREMENT="minor" nox -s ci_autotag
+nox -s ci_autotag -- --increment minor
 
 # add a feature to develop
 git checkout develop
@@ -44,9 +44,9 @@ nox -s ci_autotag
 nox -s ci_release
 # skip autotag for master, bc it's still at 1.0.0
 git checkout staging
-AUTOPILOT_INCREMENT="patch" nox -s ci_autotag
+nox -s ci_autotag
 git checkout develop
-AUTOPILOT_INCREMENT="minor" nox -s ci_autotag
+nox -s ci_autotag -- --increment minor
 
 touch src/feat2.txt
 git add src/feat2.txt
@@ -81,11 +81,11 @@ nox -s ci_autotag
 
 nox -s ci_release
 git checkout master
-AUTOPILOT_INCREMENT="patch" nox -s ci_autotag
+nox -s ci_autotag
 git checkout staging
-AUTOPILOT_INCREMENT="patch" nox -s ci_autotag
+nox -s ci_autotag
 git checkout develop
-AUTOPILOT_INCREMENT="minor" nox -s ci_autotag
+nox -s ci_autotag -- --increment minor
 
 
 git log --graph --abbrev-commit --decorate --format=format:'%C(white)%s%C(reset) %C(dim white)-%C(auto)%d%C(reset)' --all

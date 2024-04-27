@@ -26,10 +26,12 @@ test:
 
 .deploy_base:
   stage: deploy
+  variables:
+    AUTOPILOT_INCREMENT: "patch"
   script:
    - echo "Deploying $TARGET_BRANCH!"
    - pip install nox
-   - nox -s ci_autotag --force-color
+   - nox -s ci_autotag --force-color -- --increment $AUTOPILOT_INCREMENT
   # releases must be performed serially, in order
   resource_group: "$TARGET_BRANCH"
   rules:

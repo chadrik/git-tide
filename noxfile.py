@@ -1,5 +1,6 @@
 from __future__ import absolute_import, print_function, annotations
 
+import argparse
 import os
 import re
 import subprocess
@@ -45,8 +46,17 @@ class Branch:
 # ]
 
 
-def git(*args, **kwargs) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git"] + list(args), text=True, check=True, **kwargs)
+def get_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--increment", type=str.lower, default="patch", choices=["patch", "minor", "major"],
+                        help="Type of version increment to perform.")
+    return parser
+
+
+def git(*args, **kwargs):
+    # Convert all args to string and strip possible carriage returns
+    args = [str(arg).strip() for arg in args]
+    return subprocess.run(["git"] + args, text=True, check=True, **kwargs)
 
 
 def current_branch() -> str:
@@ -133,8 +143,12 @@ def get_remote() -> str | None:
 
 @nox.session(tags=["ci"])
 def ci_autotag(session: nox.Session):
-    # FIXME: replace with argparse
-    increment = os.environ.get("AUTOPILOT_INCREMENT", "patch")
+    parser = get_parser()
+    # You need to parse the arguments passed to the Nox session
+    args = parser.parse_args(session.posargs)
+
+    increment = args.increment  # Now using argparse to get the increment type
+
     session.install("-r", "requirements.txt")
     remote = get_remote()
     branch = current_branch()
