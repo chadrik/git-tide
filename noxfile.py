@@ -109,7 +109,13 @@ def get_tag_for_branch(session, branch, increment="patch") -> str:
     else:
         raise TypeError(increment)
     output = session.run(*(["cz", "bump"] + list(args) + ["--dry-run"]), silent=True)
-    return re.search('tag to create: (.*)', output).groups()[0]
+    match = re.search('tag to create: (.*)', output)
+
+    if not match:
+        session.log(output)
+        raise RuntimeError("Failed to extract tag from stdout of cz bump.")
+
+    return match.group(1).strip()
 
 
 def join(remote: str | None, branch: str) -> str:
