@@ -1,0 +1,33 @@
+exclude: '^(.git/|.nox/|.idea/|.pytest_cache/|.ruff_cache/|venv/)'
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-lint
+        name: ruff-lint
+        entry: nox -s ruff_lint --
+        require_serial: true
+        language: python
+        stages:
+          - commit
+          - manual
+        files: ^.*[^/]*[.]py$
+
+      - id: ruff-format
+        name: ruff-format
+        entry: nox -s ruff_format --
+        require_serial: true
+        language: python
+        stages:
+          - commit
+          - manual
+        files: ^.*[^/]*[.]py$
+
+      - id: yaml-lint
+        name: yaml-lint
+        entry: nox -s yaml_lint --
+        language: system
+        stages:
+          - commit
+          - manual
+        files: \.yaml$|\.yml$

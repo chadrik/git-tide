@@ -7,3 +7,14 @@ tag_format = "$version"
 version_scheme = "pep440"
 version_provider = "scm"
 major_version_zero = false
+
+[tool.mypy]
+exclude = '''^(venv|\.ruff_cache|\.nox|\.pytest_cache|\.mypy_cache)/'''
+files = "noxfile.py"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+markers = [
+    "smoke: mark a test as a smoke test",
+    "unit: mark a test as a unit test"
+]

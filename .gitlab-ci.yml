@@ -1,28 +1,50 @@
 default:
   image: python:3.12
 
+# Change pip's cache directory to be inside the project directory since we can
+# only cache local items.
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+# https://pip.pypa.io/en/stable/topics/caching/
+cache:
+  paths:
+    - .cache/pip
+
+before_script:
+  - python --version ; pip --version  # For debugging
+  - pip install nox
+
+
 stages:
   - build
   - test
   - deploy
 
-build:
-  stage: build
-  script: echo "Building!"
+.common_rules:
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
     - if: $CI_COMMIT_BRANCH =~ /master|staging|develop/
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
-test:
+build:
+  extends:
+    - .common_rules
+  stage: build
+  script: echo "Building!"
+
+unit-tests:
+  extends:
+    - .common_rules
   stage: test
-  script: echo "Testing!"
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "schedule"
-      when: never
-    - if: $CI_COMMIT_BRANCH =~ /master|staging|develop/
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script: nox -s unit_tests
+
+smoke-tests:
+  extends:
+    - .common_rules
+  stage: test
+  script: nox -s smoke_tests
 
 .deploy_base:
   stage: deploy
@@ -30,7 +52,6 @@ test:
     AUTOPILOT_INCREMENT: "patch"
   script:
    - echo "Deploying $TARGET_BRANCH!"
-   - pip install nox
    - nox -s ci_autotag --force-color -- --increment $AUTOPILOT_INCREMENT
   # releases must be performed serially, in order
   resource_group: "$TARGET_BRANCH"
@@ -60,7 +81,6 @@ deploy-develop:
   # it's ok if auto-merge does not succeed
   allow_failure: true
   script:
-   - pip install nox
    - nox -s ci_automerge --force-color
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
@@ -80,7 +100,6 @@ merge-staging-to-develop:
 make-release:
   stage: deploy
   script:
-   - pip install nox
    - nox -s ci_release --force-color
   rules:
     # add option to manually run release on staging pipelines: will convert the latest version on staging to a release

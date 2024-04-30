@@ -1,0 +1,11 @@
+﻿extends: default
+
+ignore: |
+  venv/
+  .venv/
+  .nox/
+  .pytest_cache/
+  .ruff_cache/
+
+rules:
+  document-start: disable

@@ -3,3 +3,6 @@ __pycache__
 test
 .venv*
 .nox
+.mypy_cache
+.ruff_cache
+.pytest_cache
