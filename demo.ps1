@@ -25,9 +25,12 @@ function Get-Tag {
 
 git init
 
+
+Copy-Item "$DIR\.gitignore" -Destination ".\"
 Copy-Item "$DIR\pyproject.toml" -Destination ".\"
 Copy-Item "$DIR\noxfile.py" -Destination ".\"
 Copy-Item "$DIR\requirements.txt" -Destination ".\"
+git add .gitignore
 git add pyproject.toml
 git add noxfile.py
 git add requirements.txt

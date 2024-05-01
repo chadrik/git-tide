@@ -16,9 +16,12 @@ get_tag() {
 
 git init
 
+
+cp "$DIR/.gitignore" ./
 cp "$DIR/pyproject.toml" ./
 cp "$DIR/noxfile.py" ./
 cp "$DIR/requirements.txt" ./
+git add .gitignore
 git add pyproject.toml
 git add noxfile.py
 git add requirements.txt
