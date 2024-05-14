@@ -83,9 +83,9 @@ def checkout(remote: str | None, branch: str, create=False) -> None:
     args = ["checkout"]
     if create:
         args += ["-b"]
+    args += [join(remote, branch)]
     if remote:
         args += ["--track"]
-    args += [join(remote, branch)]
     git(*args)
 
 
