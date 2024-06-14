@@ -65,7 +65,7 @@ smoke-tests:
   rules:
     - if: '$CI_COMMIT_TAG'
       when: never
-    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $TARGET_BRANCH'
+    - if: '$CI_COMMIT_BRANCH == $TARGET_BRANCH'
       changes:
         - "**/*"
       when: always
