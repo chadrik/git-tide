@@ -60,7 +60,7 @@ smoke-tests:
   script:
    - echo "Deploying $TARGET_BRANCH!"
    - nox -s autotag -v --force-color -- --annotation "$GITFLOW_TAG_ANNOTATION"
-  # releases must be performed serially, in order
+  # releases must be performed serially, in order.
   resource_group: "$TARGET_BRANCH"
   rules:
     - if: '$CI_COMMIT_TAG'
