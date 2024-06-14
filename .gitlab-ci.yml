@@ -73,7 +73,7 @@ smoke-tests:
 auto-tag-beta:
   extends: .auto-tag-base
   variables:
-    TARGET_BRANCH: $GITFLOW_STABLE_BRANCH
+    TARGET_BRANCH: $GITFLOW_BETA_BRANCH
 
 auto-tag-rc:
   extends: .auto-tag-base
@@ -83,7 +83,7 @@ auto-tag-rc:
 auto-tag-stable:
   extends: .auto-tag-base
   variables:
-    TARGET_BRANCH: $GITFLOW_BETA_BRANCH
+    TARGET_BRANCH: $GITFLOW_STABLE_BRANCH
 
 .hotfix-base:
   # always runs last

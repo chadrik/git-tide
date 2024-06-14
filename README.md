@@ -88,6 +88,8 @@ Our project leverages GitLab Pages to host and serve the documentation generated
 
 This streamlined approach to documentation allows our team to efficiently maintain and update project details, ensuring consistent and accessible information for everyone involved.
 
+URL: https://chadrik.gitlab.io/semver-demo
+
 ## Setting up your local development environment
 
 - clone the repository using either https or ssh depending on your preference and then run the following commands:
