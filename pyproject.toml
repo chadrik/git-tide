@@ -18,3 +18,11 @@ markers = [
     "smoke: mark a test as a smoke test",
     "unit: mark a test as a unit test"
 ]
+
+[tool.gitflow]
+first_tag = "0.1.0b0"
+branches = [
+    { name = "develop", prerelease = "beta" },
+    { name = "staging", prerelease = "rc" },
+    { name = "master", prerelease = "None" }
+]

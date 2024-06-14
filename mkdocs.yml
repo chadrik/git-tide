@@ -1,0 +1,9 @@
+site_name: Semver-demo
+site_description: A short description of your project
+site_author: Chad Domborova
+theme:
+  name: material
+
+nav:
+  - Home: README.md
+  - Contributing: contributing.md

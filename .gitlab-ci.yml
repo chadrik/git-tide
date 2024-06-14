@@ -5,6 +5,11 @@ default:
 # only cache local items.
 variables:
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  GITFLOW_STABLE_BRANCH: "master"
+  GITFLOW_RC_BRANCH: "staging"
+  GITFLOW_BETA_BRANCH: "develop"
+  GITFLOW_BRANCHES: "(^$GITFLOW_STABLE_BRANCH$|^$GITFLOW_RC_BRANCH$|^$GITFLOW_BETA_BRANCH$)"
+  GITFLOW_TAG_ANNOTATION: "automatic change detected"
 
 # https://pip.pypa.io/en/stable/topics/caching/
 cache:
@@ -12,20 +17,24 @@ cache:
     - .cache/pip
 
 before_script:
-  - python --version ; pip --version  # For debugging
-  - pip install nox
+  - |
+    git config --global user.email "fake@email.com"
+    git config --global user.name "ci-bot"
+    python --version ; pip --version  # For debugging
+    pip install -r requirements.txt
 
 
 stages:
   - build
   - test
-  - deploy
+  - auto-tag
+  - promote
 
 .common_rules:
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
-    - if: $CI_COMMIT_BRANCH =~ /master|staging|develop/
+    - if: '$CI_COMMIT_BRANCH =~ $GITFLOW_BRANCHES'
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
 build:
@@ -46,67 +55,81 @@ smoke-tests:
   stage: test
   script: nox -s smoke_tests
 
-.deploy_base:
-  stage: deploy
-  variables:
-    AUTOPILOT_INCREMENT: "patch"
+.auto-tag-base:
+  stage: auto-tag
   script:
    - echo "Deploying $TARGET_BRANCH!"
-   - nox -s ci_autotag --force-color -- --increment $AUTOPILOT_INCREMENT
+   - nox -s autotag -v --force-color -- --annotation "$GITFLOW_TAG_ANNOTATION"
   # releases must be performed serially, in order
   resource_group: "$TARGET_BRANCH"
   rules:
-    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: '$CI_COMMIT_TAG'
       when: never
-    - if: $CI_COMMIT_BRANCH == $TARGET_BRANCH
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $TARGET_BRANCH'
+      changes:
+        - "**/*"
+      when: always
 
-deploy-master:
-  extends: .deploy_base
+auto-tag-beta:
+  extends: .auto-tag-base
   variables:
-    TARGET_BRANCH: master
+    TARGET_BRANCH: $GITFLOW_STABLE_BRANCH
 
-deploy-staging:
-  extends: .deploy_base
+auto-tag-rc:
+  extends: .auto-tag-base
   variables:
-    TARGET_BRANCH: staging
+    TARGET_BRANCH: $GITFLOW_RC_BRANCH
 
-deploy-develop:
-  extends: .deploy_base
+auto-tag-stable:
+  extends: .auto-tag-base
   variables:
-    TARGET_BRANCH: develop
+    TARGET_BRANCH: $GITFLOW_BETA_BRANCH
 
-.automerge_base:
+.hotfix-base:
   # always runs last
   stage: .post
-  # it's ok if auto-merge does not succeed
+  # it's ok if auto-hotfix does not succeed
   allow_failure: true
   script:
-   - nox -s ci_automerge --force-color
+   - nox -s hotfix --force-color
   rules:
-    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_TAG
       when: never
-    - if: $CI_COMMIT_BRANCH == $TARGET_BRANCH && $AUTOPILOT_SKIP_AUTOMERGE != "true"
+    - if: $CI_COMMIT_BRANCH == $TARGET_BRANCH && $GITFLOW_SKIP_HOTFIX != "true"
 
-merge-master-to-staging:
-  extends: .automerge_base
+hotfix-stable-to-rc:
+  extends: .hotfix-base
   variables:
-    TARGET_BRANCH: master
+    TARGET_BRANCH: $GITFLOW_STABLE_BRANCH
 
-merge-staging-to-develop:
-  extends: .automerge_base
+hotfix-rc-to-beta:
+  extends: .hotfix-base
   variables:
-    TARGET_BRANCH: staging
+    TARGET_BRANCH: $GITFLOW_RC_BRANCH
 
-make-release:
-  stage: deploy
+promote:
+  stage: promote
+  resource_group: promote
   script:
-   - nox -s ci_release --force-color
+   - nox -s promote --force-color
   rules:
-    # add option to manually run release on staging pipelines: will convert the latest version on staging to a release
-    - if: $CI_COMMIT_BRANCH == "staging" && $CI_PIPELINE_SOURCE != "schedule" && $CI_PIPELINE_SOURCE == "push"
+    # add option to manually run promote on rc pipelines: will convert the latest version on rc to promote
+    - if: $CI_COMMIT_BRANCH == $GITFLOW_RC_BRANCH && $CI_PIPELINE_SOURCE != "schedule" && $CI_PIPELINE_SOURCE == "push"
       when: manual
       # allow_failure: true is required to prevent this job from blocking the pipeline.
       # Feature request: https://gitlab.com/gitlab-org/gitlab/-/issues/28036
       allow_failure: true
-    - if: $CI_PIPELINE_SOURCE == "schedule" && $SCHEDULED_JOB_NAME == "make-release"
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $SCHEDULED_JOB_NAME == "promote"
       when: manual
+
+
+pages:
+  script:
+    - nox -s docs
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: $CI_COMMIT_BRANCH == $GITFLOW_BETA_BRANCH
+      when: always
+
