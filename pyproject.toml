@@ -1,12 +1,24 @@
-[project]
-name = "semver-demo"
+[tool.poetry]
+name = "monoflow"
+packages = [
+    { include = "monoflow.py", from = "src" },
+]
+version = "0.1.0"
+description = "CLI for gitflow-style branching in a monorepo"
+authors = ["Chad Dombrova", "Matt Collie"]
 
-[tool.commitizen]
-name = "cz_conventional_commits"
-tag_format = "$version"
-version_scheme = "pep440"
-version_provider = "scm"
-major_version_zero = false
+[tool.poetry.dependencies]
+requests = "2.32.2"
+commitizen = "3.16.0"
+tomli = { version = "^2.0.1", python = "<3.11" }
+click = "8.1.7"
+
+[tool.poetry.scripts]
+autogitflow = "autogitflow:cli"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
 
 [tool.mypy]
 exclude = '''^(venv|\.ruff_cache|\.nox|\.pytest_cache|\.mypy_cache)/'''

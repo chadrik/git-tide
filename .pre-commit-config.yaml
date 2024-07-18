@@ -23,11 +23,12 @@ repos:
           - manual
         files: ^.*[^/]*[.]py$
 
-      - id: yaml-lint
-        name: yaml-lint
-        entry: nox -s yaml_lint --
-        language: system
-        stages:
-          - commit
-          - manual
-        files: \.yaml$|\.yml$
+# FIXME: replace with yamlfmt
+#       - id: yaml-lint
+#         name: yaml-lint
+#         entry: nox -s yaml_lint --
+#         language: system
+#         stages:
+#           - commit
+#           - manual
+#         files: \.yaml$|\.yml$
