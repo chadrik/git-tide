@@ -522,6 +522,8 @@ def run_autotag(
     Trigger the 'autotag' command to automatically generate a new git tag.
 
     Args:
+        branch: branch that triggered the pipeline
+        remote_data: Dataclass corresponding to the remote being used
         annotation (str): A custom annotation message for the git tag. Defaults to "automatic change detected".
 
     This function runs a command that automates the process of tagging the current commit in the git repository.
@@ -565,6 +567,8 @@ def run_promote(
     Promote changes in a git repository to simulate a promotion process handled typically by CI/CD.
 
     Args:
+        breta: name of the beta branch
+        remote_data: Dataclass corresponding to the remote being used
         monkeypatch (MonkeyPatch): The pytest monkeypatch fixture to mock environment variables.
 
     This function sets the latest commit from the BETA branch as the start of a new cycle,
@@ -625,31 +629,33 @@ def run_hotfix(branch: str, remote_data: GitlabData | LocalData) -> None:
         return
 
     time.sleep(DELAY)
-    subprocess.run([sys.executable, "-m", "monoflow", "hotfix"])
+    subprocess.run([sys.executable, "-m", "monoflow", "hotfix"], check=True)
 
 
 @contextlib.contextmanager
 def pipeline(
     branch: str,
-    title: str,
+    description: str,
     remote_data: GitlabData | LocalData,
     monkeypatch,
     base_rev=None,
 ) -> Generator[None, None]:
     """
-    Simulate the begining of a new CI pipeline.
+    Simulate the beginning of a new CI pipeline.
 
     Checkout a branch and configure the environment.
 
     Args:
-        branch (str): The branch to check out.
+        branch: The branch to check out.
+        description: Description of the pipeline for debugging purposes
+        remote_data: Dataclass corresponding to the remote being used
         monkeypatch: The pytest monkeypatch fixture for setting environment variables.
 
     Returns:
         None
     """
     print()
-    print(f"Starting pipeline: {title}")
+    print(f"Starting pipeline: {description}")
     git("checkout", branch)
     git("pull")
 

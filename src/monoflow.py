@@ -16,10 +16,10 @@ try:
 except ImportError:
     import tomllib
 from dataclasses import dataclass, field
-from typing import Optional
 from functools import cache
 
 
+ENVVAR_PREFIX = "MONOFLOW"
 PROMOTION_PENDING_VAR = "MONOFLOW_MINOR_BUMP_PENDING_{}_{}"
 HOTFIX_MESSAGE = "auto-hotfix into {upstream_branch}: {message}"
 HERE = os.path.dirname(__file__)
@@ -264,7 +264,7 @@ def get_branches() -> list[str]:
     return [x.split()[-1] for x in result.stdout.splitlines()]
 
 
-def checkout(remote: Optional[str], branch: str, create: bool = False) -> str:
+def checkout(remote: str | None, branch: str, create: bool = False) -> str:
     """
     Check out a specific branch, optionally creating it if it doesn't exist.
 
@@ -291,7 +291,7 @@ def checkout(remote: Optional[str], branch: str, create: bool = False) -> str:
     return get_latest_commit(None, branch)
 
 
-def get_upstream_branch(branch: str) -> Optional[str]:
+def get_upstream_branch(branch: str) -> str | None:
     """
     Determine the upstream branch for a given branch name based on configuration.
 
@@ -327,13 +327,13 @@ def branch_exists(branch: str) -> bool:
     return True
 
 
-def get_latest_commit(remote: Optional[str], branch_name: str) -> str:
+def get_latest_commit(remote: str | None, branch_name: str) -> str:
     """
     Fetch the latest commit hash from a specific branch.
 
     Args:
         branch_name (str): The name of the branch to fetch the latest commit from.
-        remote (Optional[str]): The name of the remote repository. If None, the local repository is used.
+        remote (str | None): The name of the remote repository. If None, the local repository is used.
 
     Returns:
         str: The latest commit hash of the specified branch.
@@ -397,13 +397,13 @@ def get_tag_for_branch(branch: str, folder: str) -> tuple[str, str]:
     return tag, increment
 
 
-def join(remote: Optional[str], branch: str) -> str:
+def join(remote: str | None, branch: str) -> str:
     """
     Construct a full branch path with remote prefix if specified.
 
     Args:
-        remote (Optional[str]): The remote repository name, or None if local.
-        branch (str): The branch name.
+        remote: The remote repository name, or None if local.
+        branch: The branch name.
 
     Returns:
         str: The full path to the branch, prefixed by the remote name if specified.
@@ -555,7 +555,7 @@ def hotfix() -> None:
         # this will trigger a full pipeline for upstream_branch, and potentially another auto-merge
         click.echo(f"Pushing {upstream_branch} to {remote}")
         if remote == GITLAB_REMOTE:
-            push_opts = ["-o", f"ci.variable=MONOFLOW_AUTOTAG_ANNOTATION={msg}"]
+            push_opts = ["-o", f"ci.variable={ENVVAR_PREFIX}_AUTOTAG_ANNOTATION={msg}"]
         else:
             push_opts = []
         git("push", remote, upstream_branch, *push_opts)
@@ -620,9 +620,9 @@ def promote() -> None:
                 args.extend(
                     [
                         "-o",
-                        "ci.variable=MONOFLOW_SKIP_HOTFIX=true",
+                        f"ci.variable={ENVVAR_PREFIX}_SKIP_HOTFIX=true",
                         "-o",
-                        f"ci.variable=MONOFLOW_AUTOTAG_ANNOTATION={log_msg}",
+                        f"ci.variable={ENVVAR_PREFIX}_AUTOTAG_ANNOTATION={log_msg}",
                     ]
                 )
             git(*args)
@@ -662,4 +662,4 @@ def promote() -> None:
 
 
 if __name__ == "__main__":
-    cli(auto_envvar_prefix="MONOFLOW")
+    cli(auto_envvar_prefix=ENVVAR_PREFIX)

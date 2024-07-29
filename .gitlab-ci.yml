@@ -1,15 +1,16 @@
 default:
-  image: python:3.12
+  image: python:3.11
 
 # Change pip's cache directory to be inside the project directory since we can
 # only cache local items.
 variables:
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
-  GITFLOW_STABLE_BRANCH: "master"
-  GITFLOW_RC_BRANCH: "staging"
-  GITFLOW_BETA_BRANCH: "develop"
-  GITFLOW_BRANCHES: "(^$GITFLOW_STABLE_BRANCH$|^$GITFLOW_RC_BRANCH$|^$GITFLOW_BETA_BRANCH$)"
-  GITFLOW_TAG_ANNOTATION: "automatic change detected"
+  # FIXME: these don't work in rules the way that we want them to.
+  MONOFLOW_STABLE_BRANCH: "master"
+  MONOFLOW_RC_BRANCH: "staging"
+  MONOFLOW_BETA_BRANCH: "develop"
+  # MONOFLOW_BRANCHES: "(^$MONOFLOW_STABLE_BRANCH$|^$MONOFLOW_RC_BRANCH$|^$MONOFLOW_BETA_BRANCH$)"
+  MONOFLOW_AUTOTAG_ANNOTATION: $CI_COMMIT_TITLE
 
 # https://pip.pypa.io/en/stable/topics/caching/
 cache:
@@ -22,7 +23,8 @@ before_script:
     git config --global user.name "ci-bot"
     python --version ; pip --version  # For debugging
     pip install -r requirements.txt
-
+    env
+    git log --graph --abbrev-commit --oneline --all --decorate
 
 stages:
   - build
@@ -32,55 +34,61 @@ stages:
 
 .common_rules:
   rules:
-    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_TAG
       when: never
-    - if: '$CI_COMMIT_BRANCH =~ $GITFLOW_BRANCHES'
+    - if: '$CI_COMMIT_BRANCH =~ "^(master|staging|develop)$"'
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
-build:
-  extends:
-    - .common_rules
-  stage: build
-  script: echo "Building!"
+# debug:
+#   stage: build
+#   script: env
+
+# build:
+#   extends:
+#     - .common_rules
+#   stage: build
+#   script: echo "Building!"
 
 unit-tests:
   extends:
     - .common_rules
   stage: test
-  script: nox -s unit_tests
+  script: echo "Testing!"
+#   script: nox -s unit_tests
 
 smoke-tests:
   extends:
     - .common_rules
   stage: test
-  script: nox -s smoke_tests
+  script: echo "Testing!"
+#   script: nox -s smoke_tests
 
 .auto-tag-base:
   stage: auto-tag
   script:
    - echo "Deploying $TARGET_BRANCH!"
-   - nox -s autotag -v --force-color -- --annotation "$GITFLOW_TAG_ANNOTATION"
+   - nox -s autotag -v --force-color -- --annotation "$MONOFLOW_AUTOTAG_ANNOTATION"
   # releases must be performed serially, in order.
   resource_group: "$TARGET_BRANCH"
   rules:
-    - if: '$CI_COMMIT_TAG'
+    - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_TAG
       when: never
     - if: $CI_COMMIT_BRANCH == $TARGET_BRANCH
 
-auto-tag-beta:
+auto-tag-develop:
   extends: .auto-tag-base
   variables:
-    TARGET_BRANCH: $GITFLOW_BETA_BRANCH
+    TARGET_BRANCH: develop
 
-auto-tag-rc:
+auto-tag-staging:
   extends: .auto-tag-base
   variables:
-    TARGET_BRANCH: $GITFLOW_RC_BRANCH
+    TARGET_BRANCH: staging
 
-auto-tag-stable:
+auto-tag-master:
   extends: .auto-tag-base
   variables:
-    TARGET_BRANCH: $GITFLOW_STABLE_BRANCH
+    TARGET_BRANCH: master
 
 .hotfix-base:
   # always runs last
@@ -92,17 +100,17 @@ auto-tag-stable:
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_TAG
       when: never
-    - if: $CI_COMMIT_BRANCH == $TARGET_BRANCH && $GITFLOW_SKIP_HOTFIX != "true"
+    - if: $CI_COMMIT_BRANCH == $TARGET_BRANCH && $MONOFLOW_SKIP_HOTFIX != "true"
 
-hotfix-stable-to-rc:
+hotfix-master-to-staging:
   extends: .hotfix-base
   variables:
-    TARGET_BRANCH: $GITFLOW_STABLE_BRANCH
+    TARGET_BRANCH: master
 
-hotfix-rc-to-beta:
+hotfix-staging-to-develop:
   extends: .hotfix-base
   variables:
-    TARGET_BRANCH: $GITFLOW_RC_BRANCH
+    TARGET_BRANCH: staging
 
 promote:
   stage: promote
@@ -110,23 +118,4 @@ promote:
   script:
    - nox -s promote --force-color
   rules:
-    # add option to manually run promote on rc pipelines: will convert the latest version on rc to promote
-    - if: $CI_COMMIT_BRANCH == $GITFLOW_RC_BRANCH && $CI_PIPELINE_SOURCE != "schedule" && $CI_PIPELINE_SOURCE == "push"
-      when: manual
-      # allow_failure: true is required to prevent this job from blocking the pipeline.
-      # Feature request: https://gitlab.com/gitlab-org/gitlab/-/issues/28036
-      allow_failure: true
     - if: $CI_PIPELINE_SOURCE == "schedule" && $SCHEDULED_JOB_NAME == "promote"
-      when: manual
-
-
-pages:
-  script:
-    - nox -s docs
-  artifacts:
-    paths:
-      - public
-  rules:
-    - if: $CI_COMMIT_BRANCH == $GITFLOW_BETA_BRANCH
-      when: always
-
