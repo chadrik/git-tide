@@ -1,20 +1,31 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import fnmatch
+import json
 import os
+import pprint
 import textwrap
+import tempfile
 import time
+import re
 
+import gitlab
+import gitlab.const
+import gitlab.v4.objects
 import pytest
 import shutil
 import subprocess
 import sys
 import uuid
+from datetime import datetime
+from urllib.parse import urlparse, urlunparse
 from pathlib import Path
+from collections import defaultdict
 from _pytest.monkeypatch import MonkeyPatch
 from unittest.mock import MagicMock, patch, call
-from typing import Generator, Optional
+from typing import Generator
 
 import click
 
@@ -23,6 +34,7 @@ from monoflow import (
     current_branch,
     get_branches,
     get_latest_commit,
+    current_rev,
     Gitlab,
     get_upstream_branch,
     git,
@@ -31,7 +43,24 @@ from monoflow import (
     set_config,
     Config,
     PROMOTION_PENDING_VAR,
+    LOCAL_REMOTE,
 )
+
+REMOTE_MODE = os.environ.get("REMOTE_MODE", "false").lower() in ("true", "1")
+
+if REMOTE_MODE:
+    try:
+        ACCESS_TOKEN = os.environ["ACCESS_TOKEN"]
+    except KeyError:
+        print("Must set ACCESS_TOKEN env var before running nox")
+        raise
+else:
+    ACCESS_TOKEN = None
+
+# set this to reuse an existing Gitlab remote during testing
+FORCE_GITLAB_REMOTE = os.environ.get("FORCE_GITLAB_REMOTE")
+KEEP_OLD_GITLAB_PROJECTS = os.environ.get("KEEP_OLD_GITLAB_PROJECTS", 3)
+GITLAB_API_URL = "gitlab.com"
 
 HERE = os.path.dirname(__file__)
 PROJECTS = ["projectA", "projectB"]
@@ -40,13 +69,12 @@ DELAY = 1.1
 VERBOSE = False
 
 
-def current_rev() -> str:
-    return git("rev-parse", "HEAD", stdout=subprocess.PIPE).stdout.strip()
-
-
 def all_tags(pattern: str | None = None) -> list[str]:
     """
     Return all of the tags in the Git repository.
+
+    Args:
+        pattern: glob pattern for tag names
     """
     tags = (
         git(
@@ -74,8 +102,11 @@ def latest_tag(pattern: str | None = None) -> str:
 
     This function runs the `git describe --tags --abbrev=0` command to get the most recent tag in the current branch.
 
+    Args:
+        pattern: glob pattern for tag names
+
     Returns:
-        str: The most recent tag in the repository. Returns None if no tags are found or an error occurs.
+        The most recent tag in the repository. Returns None if no tags are found or an error occurs.
     """
     if pattern:
         return all_tags(pattern)[0]
@@ -91,7 +122,74 @@ def config() -> Config:
 
 
 @pytest.fixture
-def setup_git_repo(tmpdir, monkeypatch) -> Generator[tuple[str, Config], None, None]:
+def gitlab_project():
+    if REMOTE_MODE:
+        # private token or personal token authentication (self-hosted GitLab instance)
+        if FORCE_GITLAB_REMOTE:
+            # reuse
+            url = urlparse(FORCE_GITLAB_REMOTE)
+            gl = gitlab.Gitlab(
+                url=urlunparse(url._replace(path="")),
+                private_token=ACCESS_TOKEN,
+                retry_transient_errors=True,
+            )
+            # remove leading "/"
+            project = gl.projects.get(url.path[1:])
+        else:
+            gl = gitlab.Gitlab(
+                url=f"https://{GITLAB_API_URL}",
+                private_token=ACCESS_TOKEN,
+                retry_transient_errors=True,
+            )
+            project = gl.projects.create(
+                {
+                    "name": f"semver-demo-{uuid.uuid4()}",
+                    "visibility_level": gitlab.const.Visibility.PRIVATE,
+                }
+            )
+    else:
+        project = None
+
+    yield project
+
+    if REMOTE_MODE and not FORCE_GITLAB_REMOTE:
+        # cleanup old projects
+        projects = gl.projects.list(
+            owned=True, visibility=gitlab.const.Visibility.PRIVATE
+        )
+        # these are sorted from newest to oldest
+        projects = [
+            project for project in projects if project.name.startswith("semver-demo-")
+        ]
+        if len(projects) > KEEP_OLD_GITLAB_PROJECTS:
+            for project in projects[KEEP_OLD_GITLAB_PROJECTS:]:
+                print(f"Cleaning up Gitlab project {project.name}")
+                project.delete()
+
+
+@dataclasses.dataclass
+class GitlabData:
+    project: gitlab.v4.objects.Project
+    schedule: gitlab.v4.objects.ProjectPipelineSchedule
+
+    @property
+    def remote(self) -> str:
+        return self.project.http_url_to_repo
+
+
+@dataclasses.dataclass
+class LocalData:
+    tempdir: tempfile.TemporaryDirectory
+
+    @property
+    def remote(self) -> str:
+        return self.tempdir.name
+
+
+@pytest.fixture
+def setup_git_repo(
+    tmpdir, gitlab_project, monkeypatch
+) -> Generator[tuple[str, Config], None, None]:
     """
     Pytest fixture that sets up a temporary Git repository with an initial commit of project files.
 
@@ -100,7 +198,7 @@ def setup_git_repo(tmpdir, monkeypatch) -> Generator[tuple[str, Config], None, N
         monkeypatch: Pytest's monkeypatch fixture to update environment variables.
 
     Yields:
-        str: The path of the temporary directory with initialized Git repository.
+        The path of the temporary directory with initialized Git repository.
 
     This setup includes copying essential project files, creating an initial commit, and simulating
     an autotag process. It cleans up by removing the .git directory after tests are done.
@@ -114,16 +212,24 @@ def setup_git_repo(tmpdir, monkeypatch) -> Generator[tuple[str, Config], None, N
         "noxfile.py",
         ".gitignore",
         "pyproject.toml",
+        ".gitlab-ci.yml",
+        "requirements.txt",
+        "src/monoflow.py",
     ]
+
     for file in files_to_copy:
-        shutil.copy(os.path.join(parent_directory, file), tmpdir_str)
+        dest = Path(tmpdir_str).joinpath(file)
+        os.makedirs(dest.parent, exist_ok=True)
+        shutil.copy(Path(parent_directory).joinpath(file), dest)
 
     for folder in PROJECTS:
         shutil.copytree(
             os.path.join(parent_directory, folder), os.path.join(tmpdir_str, folder)
         )
 
-    config = set_config(load_config(os.path.join(tmpdir_str, "pyproject.toml")))
+    config = set_config(
+        load_config(os.path.join(tmpdir_str, "pyproject.toml"), verbose=True)
+    )
 
     # Initialize the git repository
     git("init", "-b", config.stable)
@@ -132,37 +238,104 @@ def setup_git_repo(tmpdir, monkeypatch) -> Generator[tuple[str, Config], None, N
     message = "initial state"
     git("add", ".")
     git("commit", "-m", message, stdout=subprocess.PIPE).stdout.strip()
-
-    for branch in config.branches:
-        checkout(None, branch, create=not branch_exists(branch))
+    rev = current_rev()
+    git("checkout", "--detach", rev)
 
     monkeypatch.delenv("CI_REPOSITORY_URL", raising=False)
-    monkeypatch.setenv("ACCESS_TOKEN", "some-value")
 
+    if gitlab_project:
+        if FORCE_GITLAB_REMOTE:
+            # cleanup
+            for schedule in gitlab_project.pipelineschedules.list(get_all=True):
+                schedule.delete()
+            # FIXME: this doesn't always seem to take effect
+            for var in gitlab_project.variables.list(get_all=True):
+                var.delete()
+            assert gitlab_project.variables.list(get_all=True) == []
+
+            # allow force push
+            p_branch = gitlab_project.protectedbranches.get(config.beta)
+            p_branch.allow_force_push = True
+            p_branch.save()
+
+        gitlab_project.variables.create({"key": "ACCESS_TOKEN", "value": ACCESS_TOKEN})
+        remote_data = GitlabData(gitlab_project, None)
+        push_opts = ["-o", "ci.skip"]
+    else:
+        monkeypatch.setenv("ACCESS_TOKEN", "some-value")
+        local_remote = tempfile.TemporaryDirectory()
+        os.chdir(local_remote.name)
+        git("init", "--bare")
+        os.chdir(tmpdir_str)
+        remote_data = LocalData(local_remote)
+        push_opts = []
+
+    git("remote", "add", "origin", remote_data.remote)
+
+    if FORCE_GITLAB_REMOTE:
+        # cleanup remote tags
+        git("fetch", "--tags")
+        tags = all_tags()
+        if tags:
+            git("tag", "-d", *tags)
+            git("push", "origin", "--delete", *tags)
+        git("prune")
+
+    git("fetch", "--all")
+    git("branch", "-la")
+    git("remote", "-v")
+
+    # push branches
+    for branch in config.branches:
+        git("branch", "-f", branch, rev)
+        git("checkout", branch)
+        git("push", "-f", "--set-upstream", "origin", branch, *push_opts)
+
+    # make initial tags
     for project in PROJECTS:
         git("tag", "-a", f"{project}-1.0.0", "-m", message)
         time.sleep(DELAY)
-        configure_environment(
-            PROMOTION_PENDING_VAR.format(config.beta, project), "true", monkeypatch
+
+    print_git_graph()
+
+    git("push", "-f", "--all", *push_opts)
+    git("push", "-f", "--tags", *push_opts)
+
+    if isinstance(remote_data, GitlabData):
+        # this must happen after the branch has been created in the remote and initial commit pushed
+        schedule = gitlab_project.pipelineschedules.create(
+            {
+                "ref": config.rc,
+                "description": "Promote",
+                "cron": "6 6 * * 4",
+                "active": False,
+            }
         )
+        schedule.variables.create({"key": "SCHEDULED_JOB_NAME", "value": "promote"})
+        remote_data.schedule = schedule
 
     # Yield the directory path to allow tests to run in this environment
-    yield tmpdir_str, config
+    yield tmpdir_str, config, remote_data
+
+    if isinstance(remote_data, LocalData):
+        remote_data.tempdir.cleanup()
 
 
 def create_file_and_commit(
-    message: str, folder: Optional[str] = None, filename: Optional[str] = None
+    branch, message: str, folder: str | None = None, filename: str | None = None
 ) -> None:
     """
     Create a file and commit it to the repository.
 
     Args:
-        message (str): The commit message.
-        filename (Optional[str]): The name of the file to be created. If not provided, a UUID will be generated.
+        message: The commit message.
+        filename: The name of the file to be created. If not provided, a UUID will be generated.
 
     Returns:
         None
     """
+    git("checkout", branch)
+
     if not filename:
         filename = str(uuid.uuid4())
     if folder:
@@ -173,26 +346,7 @@ def create_file_and_commit(
     Path(path).touch()
     git("add", ".")
     git("commit", "-m", message)
-
-
-def branch_exists(branch_name: str) -> bool:
-    """
-    Check if a local git branch exists.
-
-    Args:
-        branch_name: The name of the branch to check.
-
-    Returns:
-        True if the branch exists locally, False otherwise.
-    """
-    try:
-        # Using the existing 'git' function to list local branches
-        result = git("branch", "--list", branch_name, stdout=subprocess.PIPE)
-        # Check if the branch name is in the output of the command
-        return branch_name.strip() in result.stdout.strip().split()
-    except subprocess.CalledProcessError:
-        # If the git command fails, assume the branch does not exist
-        return False
+    git("push", "-f")
 
 
 def configure_environment(key: str, value: str, monkeypatch) -> None:
@@ -211,33 +365,32 @@ def configure_environment(key: str, value: str, monkeypatch) -> None:
     monkeypatch.delenv("CI_REPOSITORY_URL", raising=False)
 
 
-def chronological_tag_history() -> str:
+def get_tags_with_annotations() -> list[str]:
     """
     Retrieve a chronological list of tags from the Git repository, formatted with their annotations.
 
+    Note that chronological order is not reliable due to the fact that jobs run in
+    parallel in Gitlab.
+
     Returns:
-        str: A formatted string containing a chronological list of tags with their annotations.
+        A list of strings containing tags and their annotations.
     """
     # Get all tags, sorted by creation date
     tags = all_tags()
 
-    tag_order = ["tag_order:"]
+    tag_order = []
     for tag in tags:
-        annotation = git("tag", "-n", tag, stdout=subprocess.PIPE).stdout.strip()
+        annotation = git(
+            "tag", "-n", "--format=%(subject)", tag, stdout=subprocess.PIPE
+        ).stdout.strip()
         if not annotation:
             print(f"No annotation message found for tag {tag}")
             continue
 
-        # control the formatting
-        tag, msg = annotation.split(" ", 1)
         # Append to the tag order list
-        tag_order.append(f"{tag:<24} {msg.strip()}")
+        tag_order.append(f"{tag:<24} {annotation}")
 
-    return "\n".join(tag_order).strip()
-
-
-def format_branches(s: str, config: Config) -> str:
-    return s.strip().format(BETA=config.beta, STABLE=config.stable, RC=config.rc)
+    return tag_order
 
 
 def git_graph() -> str:
@@ -253,7 +406,21 @@ def git_graph() -> str:
     ).stdout.strip()
 
 
-def verify_git_graph(config: Config, expected_graph: str) -> None:
+def print_git_graph():
+    """
+    Prints the git graph in color, for debugging purposes
+    """
+    return git(
+        "log",
+        "--graph",
+        "--abbrev-commit",
+        "--oneline",
+        "--all",
+        "--decorate",
+    )
+
+
+def verify_git_graph(expected_graph: str) -> None:
     """
     Verify the current state of the git graph matches an expected graph.
 
@@ -263,17 +430,94 @@ def verify_git_graph(config: Config, expected_graph: str) -> None:
     This function fetches the current git graph, compares it to the expected graph, and asserts equality.
     Differences trigger an assertion error, aiding in debugging git histories in tests.
     """
-    expected = textwrap.dedent(expected_graph)
+    expected = textwrap.dedent(expected_graph).strip()
     result = git_graph()
     if VERBOSE:
-        print(format_branches(expected, config))
         print(result)
-    assert result == format_branches(
-        expected, config
-    ), f"Expected graph:\n{expected}\nActual graph:\n{result}"
+    assert result == expected, f"Expected graph:\n{expected}\nActual graph:\n{result}"
 
 
-def run_autotag(annotation: str) -> None:
+def find_pipeline_job(
+    gitlab_project: gitlab.v4.objects.Project,
+    job_name_pattern: re.Pattern,
+    rev: str | None = None,
+    source: str | None = None,
+    updated_after: datetime | None = None,
+) -> gitlab.v4.objects.ProjectJob:
+    """
+    Return a Gitlab job matching the given search parameters.
+    """
+    tries = 20
+    while tries:
+        print(
+            f"Searching for active pipeline ({source=}, {rev=}) with {job_name_pattern=}"
+        )
+        # FIXME: it appears that this can deadlock here.
+        pipelines = gitlab_project.pipelines.list(
+            get_all=True, source=source, updated_after=updated_after
+        )
+        non_match = defaultdict(list)
+        for pipeline in pipelines:
+            if pipeline.status in ["success", "failed", "skipped"]:
+                non_match["status"].append((pipeline.id, pipeline.status))
+                continue
+            if rev and pipeline.sha != rev:
+                non_match["rev"].append((pipeline.id, pipeline.rev))
+                continue
+
+            jobs = pipeline.jobs.list(get_all=True)
+            for job in jobs:
+                if job_name_pattern.match(job.name):
+                    return job
+            non_match["job_name"].append((pipeline.id, [job.name for job in jobs]))
+        print("Misses")
+        pprint.pprint(dict(non_match))
+        time.sleep(5.0)
+        tries -= 1
+    raise RuntimeError(
+        f"Failed to find {source} job matching {job_name_pattern} for {rev}"
+    )
+
+
+# def retry(func: Callable, tries=5, msg="Failed") -> None:
+#     while tries:
+#         try:
+#             return func()
+#         except requests.exceptions.ConnectionError:
+#             pass
+#         time.sleep(1.0)
+#         tries -= 1
+#     raise RuntimeError(msg)
+
+
+def wait_for_job(
+    gitlab_project: gitlab.v4.objects.Project, job: gitlab.v4.objects.ProjectJob
+):
+    """
+    Wait for the given job to complete
+    """
+    tries = 40
+    while tries:
+        print(f"{job.name} status: {job.status}")
+        if job.status == "success":
+            return
+        elif job.status in ["failed", "skipped"]:
+            job.pprint()
+            raise RuntimeError(f"Job {job.status}")
+        time.sleep(5.0)
+        job = gitlab_project.jobs.get(job.id)
+        tries -= 1
+    job.pprint()
+    raise RuntimeError("Job failed to complete")
+
+
+def run_autotag(
+    branch: str,
+    remote_data: GitlabData | LocalData,
+    annotation: str | None = None,
+    base_rev: str | None = None,
+    wait: bool = True,
+) -> gitlab.v4.objects.ProjectJob | None:
     """
     Trigger the 'autotag' command to automatically generate a new git tag.
 
@@ -282,20 +526,41 @@ def run_autotag(annotation: str) -> None:
 
     This function runs a command that automates the process of tagging the current commit in the git repository.
     """
+    if annotation is None:
+        # get from the commit message.  this mimics the behavior of gitlab-ci.yml
+        annotation = git(
+            "log", "--pretty=format:%s", "-n1", stdout=subprocess.PIPE
+        ).stdout.strip()
+
+    print(f"Running autotag: {annotation=}, {base_rev=}")
+    if isinstance(remote_data, GitlabData):
+        job = find_pipeline_job(
+            remote_data.project,
+            re.compile(rf"^auto-tag-{branch}$"),
+            source="push",
+            updated_after=datetime.fromisoformat(remote_data.project.updated_at),
+        )
+        if wait:
+            wait_for_job(remote_data.project, job)
+        print("autotag job done")
+        return job
+
     time.sleep(DELAY)
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "monoflow",
-            "autotag",
-            f"--annotation={annotation}",
-        ],
-        check=True,
-    )
+    args = [
+        sys.executable,
+        "-m",
+        "monoflow",
+        "autotag",
+        f"--annotation={annotation}",
+    ]
+    if base_rev:
+        args.extend(["--base-rev", base_rev])
+    subprocess.run(args, check=True)
 
 
-def run_promote(beta: str, monkeypatch: MonkeyPatch) -> None:
+def run_promote(
+    beta: str, remote_data: GitlabData | LocalData, monkeypatch: MonkeyPatch
+) -> list[dict[str, str]] | None:
     """
     Promote changes in a git repository to simulate a promotion process handled typically by CI/CD.
 
@@ -305,21 +570,60 @@ def run_promote(beta: str, monkeypatch: MonkeyPatch) -> None:
     This function sets the latest commit from the BETA branch as the start of a new cycle,
     checks out the specified branch, and triggers the 'promote' command.
     """
+    if isinstance(remote_data, GitlabData):
+        try:
+            remote_data.schedule.play()
+        except gitlab.exceptions.GitlabPipelinePlayError as err:
+            # schedule id can become stale?
+            print(err)
+            schedules = remote_data.project.pipelineschedules.list(get_all=True)
+            for mayabe_schedule in schedules:
+                if mayabe_schedule.description == "Promote":
+                    mayabe_schedule.play()
+                    break
+            else:
+                raise RuntimeError("Could not find Promote schedule")
+        job = find_pipeline_job(
+            remote_data.project,
+            re.compile("^promote$"),
+            source="schedule",
+            updated_after=datetime.fromisoformat(remote_data.project.updated_at),
+        )
+        wait_for_job(remote_data.project, job)
+        print("promote job done")
+        return None
+
     time.sleep(DELAY)
-    subprocess.run([sys.executable, "-m", "monoflow", "promote"])
+    result = subprocess.run(
+        [sys.executable, "-m", "monoflow", "promote"], text=True, stdout=subprocess.PIPE
+    )
+    print(result.stdout)
+    tag_args = []
+    for line in result.stdout.splitlines():
+        if line.startswith("Trigger: "):
+            tag_args.append(json.loads(line.split(": ", 1)[1]))
+
     for project in PROJECTS:
         configure_environment(
             PROMOTION_PENDING_VAR.format(beta, project), "true", monkeypatch
         )
+    return tag_args
 
 
-def run_hotfix(monkeypatch: MonkeyPatch) -> None:
+def run_hotfix(branch: str, remote_data: GitlabData | LocalData) -> None:
     """
     Trigger the 'hotfix' command to handle hotfix operations without affecting minor version increments.
-
-    Args:
-        monkeypatch (MonkeyPatch): The pytest monkeypatch fixture to mock environment variables.
     """
+    if isinstance(remote_data, GitlabData):
+        job = find_pipeline_job(
+            remote_data.project,
+            re.compile(f"^hotfix-{branch}-to-.*$"),
+            source="push",
+            updated_after=datetime.fromisoformat(remote_data.project.updated_at),
+        )
+        wait_for_job(remote_data.project, job)
+        return
+
     time.sleep(DELAY)
     subprocess.run([sys.executable, "-m", "monoflow", "hotfix"])
 
@@ -328,8 +632,9 @@ def run_hotfix(monkeypatch: MonkeyPatch) -> None:
 def pipeline(
     branch: str,
     title: str,
+    remote_data: GitlabData | LocalData,
     monkeypatch,
-    is_merge_request=True,
+    base_rev=None,
 ) -> Generator[None, None]:
     """
     Simulate the begining of a new CI pipeline.
@@ -345,21 +650,63 @@ def pipeline(
     """
     print()
     print(f"Starting pipeline: {title}")
-    checkout(None, branch)
+    git("checkout", branch)
+    git("pull")
 
-    print(git_graph())
     print()
+    print("USER")
+    print_git_graph()
 
-    latest_commit = current_rev()
-    if is_merge_request:
-        configure_environment("CI_PIPELINE_SOURCE", "merge_request_event", monkeypatch)
-        configure_environment(
-            "CI_MERGE_REQUEST_DIFF_BASE_SHA", latest_commit, monkeypatch
-        )
-    else:
+    cwd = os.getcwd()
+
+    if isinstance(remote_data, LocalData):
+        latest_commit = current_rev()
+
+        if not base_rev:
+            try:
+                base_rev = git(
+                    "rev-parse",
+                    "HEAD^",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                ).stdout.strip()
+            except subprocess.CalledProcessError:
+                base_rev = "0000000000000000000000000000000000000000"
+
         configure_environment("CI_PIPELINE_SOURCE", "push", monkeypatch)
         configure_environment("CI_COMMIT_SHA", latest_commit, monkeypatch)
-    yield
+        configure_environment("CI_COMMIT_BEFORE_SHA", base_rev, monkeypatch)
+        configure_environment("CI_COMMIT_BRANCH", branch, monkeypatch)
+
+        tmpdir = tempfile.TemporaryDirectory()
+        print("created temporary directory", tmpdir.name)
+        os.chdir(tmpdir.name)
+        git("init", "-b", branch)
+        # FIXME: in Gitlab the "origin" is configured, and the only branch that exists is the remote trigger branch
+        git("remote", "add", LOCAL_REMOTE, remote_data.remote)
+        git("fetch", "--quiet", LOCAL_REMOTE, latest_commit)
+        # in Gitlab all tags exist
+        git("fetch", "--quiet", LOCAL_REMOTE, "--tags")
+        git("checkout", "--detach", latest_commit)
+
+        print()
+        print("RUNNER")
+        print_git_graph()
+
+        yield
+
+        tmpdir.cleanup()
+
+    else:
+        yield
+
+    # change to local repo
+    os.chdir(cwd)
+
+    # sync with remote
+    git("fetch", "--tags")
+    git("fetch")
+    git("checkout", branch)
 
 
 # @pytest.mark.unit
@@ -522,7 +869,7 @@ def test_checkout_existing_branch():
 
     mock_git.assert_has_calls(
         [
-            call("checkout", f"{remote}/{branch}", "--track"),
+            call("branch", f"--set-upstream-to={remote}/{branch}"),
             call("rev-parse", branch, stdout=subprocess.PIPE),
         ]
     )
@@ -539,7 +886,8 @@ def test_checkout_new_branch():
 
     mock_git.assert_has_calls(
         [
-            call("checkout", "-b", f"{remote}/{branch}", "--track"),
+            call("rev-parse", "--verify", branch, stderr=subprocess.PIPE),
+            call("branch", f"--set-upstream-to={remote}/{branch}"),
             call("rev-parse", branch, stdout=subprocess.PIPE),
         ]
     )
@@ -569,7 +917,8 @@ def test_checkout_local_new_branch():
 
     mock_git.assert_has_calls(
         [
-            call("checkout", "-b", branch),
+            call("rev-parse", "--verify", branch, stderr=subprocess.PIPE),
+            call("checkout", branch),
             call("rev-parse", branch, stdout=subprocess.PIPE),
         ]
     )
@@ -783,8 +1132,8 @@ def test_get_remote_in_ci_environment():
 
 @pytest.mark.unit
 def test_get_remote_in_local_environment():
-    with patch.dict("os.environ", {}, clear=True):  #
-        assert Gitlab.get_remote() is None
+    with patch.dict("os.environ", {}, clear=True):
+        assert Gitlab.get_remote() == LOCAL_REMOTE
 
 
 @pytest.mark.unit
@@ -838,24 +1187,36 @@ def test_get_current_branch_in_local_environment():
 #         assert config == expected_config
 
 
-expected_tags = r"""
-tag_order:
-projectB-1.1.0           promoting {RC} to {STABLE}!
-projectA-1.2.0           promoting {RC} to {STABLE}!
-projectB-1.1.0rc0        promoting {BETA} to {RC}!
-projectA-1.2.0rc0        promoting {BETA} to {RC}!
-projectA-1.1.0           promoting {RC} to {STABLE}!
-projectA-1.2.0b2         auto-hotfix into {BETA}: {RC}: (projectA) add hotfix 2
-projectA-1.1.0rc2        {RC}: (projectA) add hotfix 2
-projectB-1.1.0b0         {BETA}: (projectB) add feature 1
-projectA-1.2.0b1         auto-hotfix into {BETA}: {STABLE}: (projectA) add hotfix
-projectA-1.1.0rc1        auto-hotfix into {RC}: {STABLE}: (projectA) add hotfix
-projectA-1.0.1           {STABLE}: (projectA) add hotfix
-projectA-1.2.0b0         {BETA}: (projectA) add beta feature 2
-projectA-1.1.0rc0        promoting {BETA} to {RC}!
-projectA-1.1.0b0         {BETA}: (projectA) add feature 1
-projectB-1.0.0           initial state
-projectA-1.0.0           initial state"""
+def _run_autotag_jobs(tag_args: list[dict], remote_data, monkeypatch):
+    """
+    Execute one or more autotag pipelines.
+
+    Autotag jobs may run in parallel on multiple pipelines.
+    """
+    pprint.pprint(tag_args)
+    jobs = []
+    for tag_arg in tag_args:
+        with pipeline(
+            tag_arg["branch"],
+            "Post-promotion autotag",
+            remote_data,
+            monkeypatch,
+        ):
+            jobs.append(
+                run_autotag(
+                    tag_arg["branch"],
+                    remote_data,
+                    annotation=tag_arg["annotation"],
+                    base_rev=tag_arg["base_rev"],
+                    wait=False,
+                )
+            )
+    if isinstance(remote_data, GitlabData):
+        print("Waiting for jobs: {}".format([job.name for job in jobs]))
+        for job in jobs:
+            wait_for_job(remote_data.project, job)
+        git("fetch", "--tags")
+        git("fetch")
 
 
 @pytest.mark.unit
@@ -863,15 +1224,18 @@ def test_dev_cycle(setup_git_repo, monkeypatch) -> None:
     """
     Test the development cycle by mimicking typical operations in a CICD environment.
 
+    This uses a 3-repo system to emulate Gitlab CI.
+
+    1. local: the user's repo, and its state is used to test assertions
+    2. runner: the temporary local clone used to run CI scripts.
+    3. remote: represents the central Gitlab repo.  the "runner" pushes to this repo.
+
     Args:
         setup_git_repo: The pytest fixture for setting up a temporary Git repository.
         monkeypatch: The pytest monkeypatch fixture for setting environment variables.
-
-    Returns:
-        None
     """
-    tmpdir, config = setup_git_repo
-    assert os.path.isdir(tmpdir)
+    local_repo, config, remote_data = setup_git_repo
+    assert os.path.isdir(local_repo)
     assert latest_tag("projectA-*") == "projectA-1.0.0"
 
     # The trick here is to try and mimic what the
@@ -880,155 +1244,285 @@ def test_dev_cycle(setup_git_repo, monkeypatch) -> None:
     # things done by developers and others
     # done by our CICD.
 
-    print()
-    print(git_graph())
+    print_git_graph()
     print()
 
     # (ProjectA) Add feature 1 to BETA branch
-    annotation = f"{config.beta}: (projectA) add feature 1"
-    with pipeline(config.beta, "(ProjectA) Add feature 1 to BETA branch", monkeypatch):
-        create_file_and_commit(annotation, folder="projectA")
-        run_autotag(annotation)
-        assert latest_tag("projectA-*") == "projectA-1.1.0b0"
+    msg = f"{config.beta}: (projectA) add feature 1"
+    create_file_and_commit(config.beta, msg, folder="projectA")
+    with pipeline(
+        config.beta,
+        "(ProjectA) Add feature 1 to BETA branch",
+        remote_data,
+        monkeypatch,
+    ):
+        # this pipeline runs in response to a merged merge request
+        run_autotag(config.beta, remote_data)
         configure_environment(
             PROMOTION_PENDING_VAR.format(config.beta, "projectA"), "false", monkeypatch
         )
+
+    assert latest_tag("projectA-*") == "projectA-1.1.0b0"
 
     # Promote (promote always runs on rc, according to our .gitlab-ci.yml)
-    with pipeline(config.rc, "Promote", monkeypatch, is_merge_request=False):
-        run_promote(config.beta, monkeypatch)
-        assert latest_tag("projectA-*") == "projectA-1.1.0rc0"
+    with pipeline(
+        config.rc,
+        "Promote",
+        remote_data,
+        monkeypatch,
+    ):
+        # this pipeline runs manually or on a schedule
+        tag_args = run_promote(config.beta, remote_data, monkeypatch)
 
-    expected = r"""
-    * {BETA}: (projectA) add feature 1 -  (HEAD -> {BETA}, tag: projectA-1.1.0rc0, tag: projectA-1.1.0b0, {RC})
-    * initial state -  (tag: projectB-1.0.0, tag: projectA-1.0.0, {STABLE})"""
-    verify_git_graph(config, expected)
+    if tag_args is None:
+        tag_args = [
+            {
+                "annotation": "promoting develop to staging!",
+                "base_rev": None,
+                "branch": "staging",
+            }
+        ]
+
+    _run_autotag_jobs(tag_args, remote_data, monkeypatch)
+
+    expected = rf"""
+    * {config.beta}: (projectA) add feature 1 -  (HEAD -> {config.rc}, tag: projectA-1.1.0rc0, tag: projectA-1.1.0b0, origin/{config.rc}, origin/{config.beta}, {config.beta})
+    * initial state -  (tag: projectB-1.0.0, tag: projectA-1.0.0, origin/{config.stable}, {config.stable})"""
+    verify_git_graph(expected)
+
+    assert latest_tag("projectA-*") == "projectA-1.1.0rc0"
 
     # (ProjectA) Add beta feature 2 to BETA branch
-    annotation = f"{config.beta}: (projectA) add beta feature 2"
+    msg = f"{config.beta}: (projectA) add beta feature 2"
+    create_file_and_commit(config.beta, msg, folder="projectA")
     with pipeline(
-        config.beta, "(ProjectA) Add beta feature 2 to BETA branch", monkeypatch
+        config.beta,
+        "(ProjectA) Add beta feature 2 to BETA branch",
+        remote_data,
+        monkeypatch,
     ):
-        create_file_and_commit(annotation, folder="projectA")
-        run_autotag(annotation)
-        assert latest_tag("projectA-*") == "projectA-1.2.0b0"
+        # this pipeline runs in response to a merged merge request
+        run_autotag(config.beta, remote_data)
         configure_environment(
             PROMOTION_PENDING_VAR.format(config.beta, "projectA"), "false", monkeypatch
         )
 
-    expected = r"""
-    * {BETA}: (projectA) add beta feature 2 -  (HEAD -> {BETA}, tag: projectA-1.2.0b0)
-    * {BETA}: (projectA) add feature 1 -  (tag: projectA-1.1.0rc0, tag: projectA-1.1.0b0, {RC})
-    * initial state -  (tag: projectB-1.0.0, tag: projectA-1.0.0, {STABLE})"""
-    verify_git_graph(config, expected)
+    expected = rf"""
+    * {config.beta}: (projectA) add beta feature 2 -  (HEAD -> {config.beta}, tag: projectA-1.2.0b0, origin/{config.beta})
+    * {config.beta}: (projectA) add feature 1 -  (tag: projectA-1.1.0rc0, tag: projectA-1.1.0b0, origin/{config.rc}, {config.rc})
+    * initial state -  (tag: projectB-1.0.0, tag: projectA-1.0.0, origin/{config.stable}, {config.stable})"""
+    verify_git_graph(expected)
+
+    assert latest_tag("projectA-*") == "projectA-1.2.0b0"
 
     # (ProjectA) Add hotfix to STABLE branch
-    annotation = f"{config.stable}: (projectA) add hotfix"
-    with pipeline(config.stable, "(ProjectA) Add hotfix to STABLE branch", monkeypatch):
-        create_file_and_commit(annotation, folder="projectA")
-        run_autotag(annotation)
-        assert latest_tag("projectA-*") == "projectA-1.0.1"
+    msg = f"{config.stable}: (projectA) add hotfix"
+    create_file_and_commit(config.stable, msg, folder="projectA")
+    with pipeline(
+        config.stable,
+        "(ProjectA) Add hotfix to STABLE branch",
+        remote_data,
+        monkeypatch,
+    ):
+        # this pipeline runs in response to a merged merge request
+        run_autotag(config.stable, remote_data)
+        run_hotfix(config.stable, remote_data)
 
-    # FIXME: this runs as the result of a tag push. what branch does it run on?
-    # (ProjectA) Cascade hotfix to RC
-    with pipeline(config.stable, "(ProjectA) Cascade hotfix to RC", monkeypatch):
-        run_hotfix(monkeypatch)
-        assert latest_tag("projectA-*") == "projectA-1.1.0rc1"
+    assert latest_tag("projectA-*") == "projectA-1.0.1"
 
-    # (ProjectA) Cascade hotfix to BETA
-    with pipeline(config.rc, "(ProjectA) Cascade hotfix to BETA", monkeypatch):
-        run_hotfix(monkeypatch)
-        assert latest_tag("projectA-*") == "projectA-1.2.0b1"
+    annotation = f"auto-hotfix into {config.rc}: {config.stable}: (projectA) add hotfix"
+    with pipeline(
+        config.rc,
+        "(ProjectA) Cascade hotfix to RC",
+        remote_data,
+        monkeypatch,
+    ):
+        # this pipeline runs in response to a push from the pipeline above
+        run_autotag(config.rc, remote_data, annotation=annotation)
+        run_hotfix(config.rc, remote_data)
+
+    assert latest_tag("projectA-*") == "projectA-1.1.0rc1"
+
+    annotation = (
+        f"auto-hotfix into {config.beta}: {config.stable}: (projectA) add hotfix"
+    )
+    with pipeline(
+        config.beta,
+        "(ProjectA) Cascade hotfix to BETA",
+        remote_data,
+        monkeypatch,
+    ):
+        # this pipeline runs in response to a push from the pipeline above
+        run_autotag(config.beta, remote_data, annotation=annotation)
+
+    assert latest_tag("projectA-*") == "projectA-1.2.0b1"
 
     # (ProjectB) Add feature 1 to BETA branch
-    annotation = f"{config.beta}: (projectB) add feature 1"
-    with pipeline(config.beta, "(ProjectB) Add feature 1 to BETA branch", monkeypatch):
-        create_file_and_commit(annotation, folder="projectB")
-        run_autotag(annotation)
-        assert latest_tag("projectB-*") == "projectB-1.1.0b0"
+    msg = f"{config.beta}: (projectB) add feature 1"
+    create_file_and_commit(config.beta, msg, folder="projectB")
+    with pipeline(
+        config.beta,
+        "(ProjectB) Add feature 1 to BETA branch",
+        remote_data,
+        monkeypatch,
+    ):
+        # this pipeline runs in response to a merged merge request
+        run_autotag(config.beta, remote_data)
         configure_environment(
             PROMOTION_PENDING_VAR.format(config.beta, "projectB"), "false", monkeypatch
         )
 
+    assert latest_tag("projectB-*") == "projectB-1.1.0b0"
+
     # (ProjectA) Add hotfix 2 to RC branch
-    annotation = f"{config.rc}: (projectA) add hotfix 2"
-    with pipeline(config.rc, "(ProjectA) Add hotfix 2 to RC branch", monkeypatch):
-        create_file_and_commit(annotation, folder="projectA")
-        run_autotag(annotation)
-        assert latest_tag("projectA-*") == "projectA-1.1.0rc2"
+    msg = f"{config.rc}: (projectA) add hotfix 2"
+    create_file_and_commit(config.rc, msg, folder="projectA")
+    with pipeline(
+        config.rc,
+        "(ProjectA) Add hotfix 2 to RC branch",
+        remote_data,
+        monkeypatch,
+    ):
+        # this pipeline runs in response to a merged merge request
+        run_autotag(config.rc, remote_data)
+        run_hotfix(config.rc, remote_data)
 
-    # (ProjectA) Cascade hotfix 2 to BETA
-    with pipeline(config.rc, "(ProjectA) Cascade hotfix 2 to BETA", monkeypatch):
-        run_hotfix(monkeypatch)
-        assert latest_tag("projectA-*") == "projectA-1.2.0b2"
+    assert latest_tag("projectA-*") == "projectA-1.1.0rc2"
 
-        # there are no changes for projectB, so the tag should remain the same
-        assert latest_tag("projectB-*") == "projectB-1.1.0b0"
+    annotation = f"auto-hotfix into {config.beta}: {config.rc}: (projectA) add hotfix 2"
+    with pipeline(
+        config.beta,
+        "(ProjectA) Cascade hotfix to BETA",
+        remote_data,
+        monkeypatch,
+    ):
+        # this pipeline runs in response to a push from the pipeline above
+        run_autotag(config.beta, remote_data, annotation=annotation)
 
-    expected = r"""
-    *   auto-hotfix into {BETA}: {RC}: (projectA) add hotfix 2 -  (HEAD -> {BETA}, tag: projectA-1.2.0b2)
+    assert latest_tag("projectA-*") == "projectA-1.2.0b2"
+
+    expected = rf"""
+    *   auto-hotfix into {config.beta}: {config.rc}: (projectA) add hotfix 2 -  (HEAD -> {config.beta}, tag: projectA-1.2.0b2, origin/{config.beta})
     |\  
-    | * {RC}: (projectA) add hotfix 2 -  (tag: projectA-1.1.0rc2, {RC})
-    * | {BETA}: (projectB) add feature 1 -  (tag: projectB-1.1.0b0)
-    * | auto-hotfix into {BETA}: master: (projectA) add hotfix -  (tag: projectA-1.2.0b1)
+    | * {config.rc}: (projectA) add hotfix 2 -  (tag: projectA-1.1.0rc2, origin/{config.rc}, {config.rc})
+    * | {config.beta}: (projectB) add feature 1 -  (tag: projectB-1.1.0b0)
+    * | auto-hotfix into {config.beta}: master: (projectA) add hotfix -  (tag: projectA-1.2.0b1)
     |\| 
-    | *   auto-hotfix into {RC}: master: (projectA) add hotfix -  (tag: projectA-1.1.0rc1)
+    | *   auto-hotfix into {config.rc}: master: (projectA) add hotfix -  (tag: projectA-1.1.0rc1)
     | |\  
-    | | * {STABLE}: (projectA) add hotfix -  (tag: projectA-1.0.1, {STABLE})
-    * | | {BETA}: (projectA) add beta feature 2 -  (tag: projectA-1.2.0b0)
+    | | * {config.stable}: (projectA) add hotfix -  (tag: projectA-1.0.1, origin/{config.stable}, {config.stable})
+    * | | {config.beta}: (projectA) add beta feature 2 -  (tag: projectA-1.2.0b0)
     |/ /  
-    * / {BETA}: (projectA) add feature 1 -  (tag: projectA-1.1.0rc0, tag: projectA-1.1.0b0)
+    * / {config.beta}: (projectA) add feature 1 -  (tag: projectA-1.1.0rc0, tag: projectA-1.1.0b0)
     |/  
     * initial state -  (tag: projectB-1.0.0, tag: projectA-1.0.0)
     """
-    verify_git_graph(config, expected)
+    verify_git_graph(expected)
+
+    # there are no changes for projectB, so the tag should remain the same
+    assert latest_tag("projectB-*") == "projectB-1.1.0b0"
 
     # Promote (promote always runs on rc, according to our .gitlab-ci.yml)
-    with pipeline(config.rc, "Promote", monkeypatch, is_merge_request=False):
-        run_promote(config.beta, monkeypatch)
-        assert latest_tag("projectA-*") == "projectA-1.2.0rc0"
-        assert latest_tag("projectB-*") == "projectB-1.1.0rc0"
+    with pipeline(
+        config.rc,
+        "Promote",
+        remote_data,
+        monkeypatch,
+    ):
+        tag_args = run_promote(config.beta, remote_data, monkeypatch)
 
-    expected = r"""
-    *   auto-hotfix into {BETA}: {RC}: (projectA) add hotfix 2 -  (HEAD -> {BETA}, tag: projectB-1.1.0rc0, tag: projectA-1.2.0rc0, tag: projectA-1.2.0b2, {RC})
+    if tag_args is None:
+        tag_args = [
+            {
+                "annotation": "promoting staging to master!",
+                "base_rev": None,
+                "branch": "master",
+            },
+            {
+                "annotation": "promoting develop to staging!",
+                "base_rev": None,
+                "branch": "staging",
+            },
+        ]
+
+    _run_autotag_jobs(tag_args, remote_data, monkeypatch)
+
+    expected = rf"""
+    *   auto-hotfix into {config.beta}: {config.rc}: (projectA) add hotfix 2 -  (HEAD -> {config.rc}, tag: projectB-1.1.0rc0, tag: projectA-1.2.0rc0, tag: projectA-1.2.0b2, origin/{config.rc}, origin/{config.beta}, {config.beta})
     |\  
-    | * {RC}: (projectA) add hotfix 2 -  (tag: projectA-1.1.0rc2, tag: projectA-1.1.0, {STABLE})
-    * | {BETA}: (projectB) add feature 1 -  (tag: projectB-1.1.0b0)
-    * | auto-hotfix into {BETA}: {STABLE}: (projectA) add hotfix -  (tag: projectA-1.2.0b1)
+    | * {config.rc}: (projectA) add hotfix 2 -  (tag: projectA-1.1.0rc2, tag: projectA-1.1.0, origin/{config.stable}, {config.stable})
+    * | {config.beta}: (projectB) add feature 1 -  (tag: projectB-1.1.0b0)
+    * | auto-hotfix into {config.beta}: {config.stable}: (projectA) add hotfix -  (tag: projectA-1.2.0b1)
     |\| 
-    | *   auto-hotfix into {RC}: {STABLE}: (projectA) add hotfix -  (tag: projectA-1.1.0rc1)
+    | *   auto-hotfix into {config.rc}: {config.stable}: (projectA) add hotfix -  (tag: projectA-1.1.0rc1)
     | |\  
-    | | * {STABLE}: (projectA) add hotfix -  (tag: projectA-1.0.1)
-    * | | {BETA}: (projectA) add beta feature 2 -  (tag: projectA-1.2.0b0)
+    | | * {config.stable}: (projectA) add hotfix -  (tag: projectA-1.0.1)
+    * | | {config.beta}: (projectA) add beta feature 2 -  (tag: projectA-1.2.0b0)
     |/ /  
-    * / {BETA}: (projectA) add feature 1 -  (tag: projectA-1.1.0rc0, tag: projectA-1.1.0b0)
+    * / {config.beta}: (projectA) add feature 1 -  (tag: projectA-1.1.0rc0, tag: projectA-1.1.0b0)
     |/  
     * initial state -  (tag: projectB-1.0.0, tag: projectA-1.0.0)"""
-    verify_git_graph(config, expected)
+    verify_git_graph(expected)
 
     # Promote (promote always runs on rc, according to our .gitlab-ci.yml)
-    with pipeline(config.rc, "Promote", monkeypatch, is_merge_request=False):
-        run_promote(config.beta, monkeypatch)
-        assert latest_tag("projectA-*") == "projectA-1.2.0"
-        assert latest_tag("projectB-*") == "projectB-1.1.0"
+    with pipeline(
+        config.rc,
+        "Promote",
+        remote_data,
+        monkeypatch,
+    ):
+        tag_args = run_promote(config.beta, remote_data, monkeypatch)
 
-    expected = r"""
-    *   auto-hotfix into {BETA}: {RC}: (projectA) add hotfix 2 -  (HEAD -> {BETA}, tag: projectB-1.1.0rc0, tag: projectB-1.1.0, tag: projectA-1.2.0rc0, tag: projectA-1.2.0b2, tag: projectA-1.2.0, {RC}, {STABLE})
+    if tag_args is None:
+        tag_args = [
+            {
+                "annotation": "promoting staging to master!",
+                "base_rev": None,
+                "branch": "master",
+            }
+        ]
+
+    _run_autotag_jobs(tag_args, remote_data, monkeypatch)
+
+    expected = rf"""
+    *   auto-hotfix into {config.beta}: {config.rc}: (projectA) add hotfix 2 -  (HEAD -> {config.stable}, tag: projectB-1.1.0rc0, tag: projectB-1.1.0, tag: projectA-1.2.0rc0, tag: projectA-1.2.0b2, tag: projectA-1.2.0, origin/{config.rc}, origin/{config.stable}, origin/{config.beta}, {config.rc}, {config.beta})
     |\  
-    | * {RC}: (projectA) add hotfix 2 -  (tag: projectA-1.1.0rc2, tag: projectA-1.1.0)
-    * | {BETA}: (projectB) add feature 1 -  (tag: projectB-1.1.0b0)
-    * | auto-hotfix into {BETA}: {STABLE}: (projectA) add hotfix -  (tag: projectA-1.2.0b1)
+    | * {config.rc}: (projectA) add hotfix 2 -  (tag: projectA-1.1.0rc2, tag: projectA-1.1.0)
+    * | {config.beta}: (projectB) add feature 1 -  (tag: projectB-1.1.0b0)
+    * | auto-hotfix into {config.beta}: {config.stable}: (projectA) add hotfix -  (tag: projectA-1.2.0b1)
     |\| 
-    | *   auto-hotfix into {RC}: {STABLE}: (projectA) add hotfix -  (tag: projectA-1.1.0rc1)
+    | *   auto-hotfix into {config.rc}: {config.stable}: (projectA) add hotfix -  (tag: projectA-1.1.0rc1)
     | |\  
-    | | * {STABLE}: (projectA) add hotfix -  (tag: projectA-1.0.1)
-    * | | {BETA}: (projectA) add beta feature 2 -  (tag: projectA-1.2.0b0)
+    | | * {config.stable}: (projectA) add hotfix -  (tag: projectA-1.0.1)
+    * | | {config.beta}: (projectA) add beta feature 2 -  (tag: projectA-1.2.0b0)
     |/ /  
-    * / {BETA}: (projectA) add feature 1 -  (tag: projectA-1.1.0rc0, tag: projectA-1.1.0b0)
+    * / {config.beta}: (projectA) add feature 1 -  (tag: projectA-1.1.0rc0, tag: projectA-1.1.0b0)
     |/  
     * initial state -  (tag: projectB-1.0.0, tag: projectA-1.0.0)"""
-    verify_git_graph(config, expected)
+    verify_git_graph(expected)
 
     if VERBOSE:
-        print(chronological_tag_history())
-    assert chronological_tag_history() == format_branches(expected_tags, config)
+        print(get_tags_with_annotations())
+
+    expected_tags = rf"""
+projectB-1.1.0           promoting {config.rc} to {config.stable}!
+projectA-1.2.0           promoting {config.rc} to {config.stable}!
+projectB-1.1.0rc0        promoting {config.beta} to {config.rc}!
+projectA-1.2.0rc0        promoting {config.beta} to {config.rc}!
+projectA-1.1.0           promoting {config.rc} to {config.stable}!
+projectA-1.2.0b2         auto-hotfix into {config.beta}: {config.rc}: (projectA) add hotfix 2
+projectA-1.1.0rc2        {config.rc}: (projectA) add hotfix 2
+projectB-1.1.0b0         {config.beta}: (projectB) add feature 1
+projectA-1.2.0b1         auto-hotfix into {config.beta}: {config.stable}: (projectA) add hotfix
+projectA-1.1.0rc1        auto-hotfix into {config.rc}: {config.stable}: (projectA) add hotfix
+projectA-1.0.1           {config.stable}: (projectA) add hotfix
+projectA-1.2.0b0         {config.beta}: (projectA) add beta feature 2
+projectA-1.1.0rc0        promoting {config.beta} to {config.rc}!
+projectA-1.1.0b0         {config.beta}: (projectA) add feature 1
+projectB-1.0.0           initial state
+projectA-1.0.0           initial state"""
+
+    # order is not reliable due to Gitlab jobs running in parallel
+    assert set(get_tags_with_annotations()) == set(
+        textwrap.dedent(expected_tags).strip().splitlines()
+    )

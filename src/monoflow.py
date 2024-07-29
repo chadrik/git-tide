@@ -1,10 +1,12 @@
 from __future__ import absolute_import, print_function, annotations
 
+import base64
 import os
 import pathlib
 import re
 import subprocess
 import time
+import json
 
 import click
 import requests
@@ -14,7 +16,8 @@ try:
 except ImportError:
     import tomllib
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
+from functools import cache
 
 
 PROMOTION_PENDING_VAR = "MONOFLOW_MINOR_BUMP_PENDING_{}_{}"
@@ -22,8 +25,11 @@ HOTFIX_MESSAGE = "auto-hotfix into {upstream_branch}: {message}"
 HERE = os.path.dirname(__file__)
 CONFIG: Config
 
+LOCAL_REMOTE = "local_origin"
+GITLAB_REMOTE = "gitlab_origin"
 
-def load_config(path=None, verbose=False) -> Config:
+
+def load_config(path=None, verbose: bool = False) -> Config:
     """
     Load and return the GitFlow configuration from the pyproject.toml file.
 
@@ -61,6 +67,20 @@ def load_config(path=None, verbose=False) -> Config:
     return config
 
 
+def variable_safe_encode(folder: str) -> str:
+    import base64
+
+    # strip equal signs because they are not compatible with env vars
+    return base64.urlsafe_b64encode(folder.encode("utf-8")).decode("utf-8").strip("=")
+
+
+def variable_safe_decode(encoded: str) -> str:
+    b = encoded.encode("utf-8")
+    # equal signs are used as padding
+    padding = 3 - (len(b) % 3)
+    return base64.urlsafe_b64decode(b + b"==" * padding).decode("utf-8")
+
+
 def set_config(config: Config) -> Config:
     global CONFIG
     CONFIG = config
@@ -84,13 +104,6 @@ class Gitlab:
     """
 
     @classmethod
-    def is_first_commit_since_promotion(cls, branch, project: str) -> bool:
-        key = PROMOTION_PENDING_VAR.format(branch, project)
-        state = os.getenv(key)
-        print(key, state)
-        return state == "true"
-
-    @classmethod
     def current_branch(cls) -> str:
         try:
             return os.environ["CI_COMMIT_BRANCH"]
@@ -98,14 +111,32 @@ class Gitlab:
             raise RuntimeError
 
     @classmethod
-    def get_base_rev(cls):
-        if os.environ["CI_PIPELINE_SOURCE"] == "merge_request_event":
-            return os.environ["CI_MERGE_REQUEST_DIFF_BASE_SHA"]
-        else:
-            return os.environ["CI_COMMIT_SHA"]
+    def get_base_rev(cls) -> str:
+        return os.environ["CI_COMMIT_BEFORE_SHA"]
 
     @classmethod
-    def set_pending_state(cls, branch, project: str, state: bool) -> None:
+    def is_pending_bump(cls, branch: str, folder: str) -> bool:
+        """
+        Return whether the given branch and folder combination are awaiting a minor bump.
+
+        Args:
+            branch: one of the registered gitflow branches
+            folder: folder within the repo that defines commitizen tag rules
+
+        Returns:
+            whether it is pending or not
+        """
+        # FIXME: handle slashes in the folder name.  base64 encoding?
+        key = PROMOTION_PENDING_VAR.format(branch, folder)
+        try:
+            state = os.environ[key]
+            return state == "true"
+        except KeyError:
+            # if the variable has not been set we assume this repo is brand new
+            return True
+
+    @classmethod
+    def set_pending_bump_state(cls, branch: str, folder: str, state: bool) -> None:
         """
         Store a state for whether the given project on the given branch needs to have a minor bump.
 
@@ -114,18 +145,23 @@ class Gitlab:
 
         This pending state is reset to True after each promotion event.
 
+        Args:
+            branch: one of the registered gitflow branches
+            folder: folder within the repo that defines commitizen tag rules
+            state: whether it is pending or not
+
         Raises:
             HTTPError: If the HTTP request to update or create the variable fails.
         """
-        headers = {
-            "PRIVATE-TOKEN": os.getenv("ACCESS_TOKEN"),
-        }
         remote = Gitlab.get_remote()
 
-        if remote:
-            base_url = f"{os.getenv('CI_API_V4_URL')}/projects/{os.getenv('CI_PROJECT_ID')}/variables"
+        if remote == GITLAB_REMOTE:
+            headers = {
+                "PRIVATE-TOKEN": os.environ["ACCESS_TOKEN"],
+            }
+            base_url = f"{os.environ['CI_API_V4_URL']}/projects/{os.environ['CI_PROJECT_ID']}/variables"
             data = {"value": "true" if state else "false"}
-            key = PROMOTION_PENDING_VAR.format(branch, project)
+            key = PROMOTION_PENDING_VAR.format(branch, folder)
 
             put_response = requests.put(
                 base_url + f"/{key}", headers=headers, data=data
@@ -137,7 +173,23 @@ class Gitlab:
                 post_response.raise_for_status()
 
     @classmethod
-    def get_remote(cls) -> Optional[str]:
+    @cache
+    def _setup_remote(cls, url: str) -> None:
+        try:
+            access_token = os.environ["ACCESS_TOKEN"]
+        except KeyError:
+            raise click.ClickException(
+                "You must setup a CI variable in the Gitlab process called ACCESS_TOKEN\n"
+                "See https://docs.gitlab.com/ee/ci/variables/#for-a-project"
+            )
+
+        git("config", "user.email", "fake@email.com")
+        git("config", "user.name", "ci-bot")
+        url = url.split("@")[-1]
+        git("remote", "add", GITLAB_REMOTE, f"https://oauth2:{access_token}@{url}")
+
+    @classmethod
+    def get_remote(cls) -> str | None:
         """
         Configure and retrieve the name of a Git remote for use in CI environments.
 
@@ -147,35 +199,21 @@ class Gitlab:
         local git configuration.
 
         Returns:
-            Optional[str]: The name of the configured remote ('gitlab_origin') if in CI mode, otherwise None.
+            The name of the configured remote ('gitlab_origin') if in CI mode, otherwise None.
 
         Raises:
-            ValueError: If the 'ACCESS_TOKEN' is not set, necessary for accessing the GitLab repository.
+            ClickException: If the 'ACCESS_TOKEN' is not set, necessary for accessing the GitLab repository.
         """
         try:
             url = os.environ["CI_REPOSITORY_URL"]
         except KeyError:
-            # return None to indicate we're not in CI mode.  would be safer to make this explicit!
-            return None
+            return LOCAL_REMOTE
 
-        remote = "gitlab_origin"
-        try:
-            access_token = os.environ["ACCESS_TOKEN"]
-        except KeyError:
-            print(
-                "You must setup a CI variable in the Gitlab process called ACCESS_TOKEN"
-            )
-            print("See https://docs.gitlab.com/ee/ci/variables/#for-a-project")
-            raise ValueError
-
-        git("config", "user.email", "fake@email.com")
-        git("config", "user.name", "ci-bot")
-        url = url.split("@")[-1]
-        git("remote", "add", remote, f"https://oauth2:{access_token}@{url}")
-        return remote
+        cls._setup_remote(url)
+        return GITLAB_REMOTE
 
 
-def git(*args, **kwargs) -> subprocess.CompletedProcess:
+def git(*args: str, **kwargs) -> subprocess.CompletedProcess:
     """
     Execute a git command with the specified arguments.
 
@@ -189,8 +227,10 @@ def git(*args, **kwargs) -> subprocess.CompletedProcess:
     Raises:
         subprocess.CalledProcessError: If the git command fails.
     """
-    args = [str(arg).strip() for arg in args]
-    return subprocess.run(["git"] + args, text=True, check=True, **kwargs)
+    args = ["git"] + [str(arg).strip() for arg in args]
+    if CONFIG.verbose:
+        click.echo(args)
+    return subprocess.run(args, text=True, check=True, **kwargs)
 
 
 def current_branch() -> str:
@@ -213,7 +253,7 @@ def current_branch() -> str:
         return branch
 
 
-def get_branches() -> List[str]:
+def get_branches() -> list[str]:
     """
     Retrieve a list of all local branches in the git repository.
 
@@ -234,13 +274,19 @@ def checkout(remote: Optional[str], branch: str, create: bool = False) -> str:
         create: Whether to create the branch if it does not exist (default is False).
     """
     args = ["checkout"]
-    if create:
-        if CONFIG.verbose:
-            click.echo(f"Creating branch {branch}")
-        args += ["-b"]
-    args += [join(remote, branch)]
+
     if remote:
-        args += ["--track"]
+        if create and not branch_exists(branch):
+            args += ["--track", join(remote, branch)]
+        else:
+            args = ["branch", f"--set-upstream-to={join(remote, branch)}"]
+    else:
+        if create and not branch_exists(branch):
+            if CONFIG.verbose:
+                click.echo(f"Creating branch {branch}")
+            args += ["-b", branch]
+        else:
+            args += [branch]
     git(*args)
     return get_latest_commit(None, branch)
 
@@ -256,7 +302,7 @@ def get_upstream_branch(branch: str) -> Optional[str]:
         The name of the upstream branch, or None if there is no upstream branch.
 
     Raises:
-        ValueError: If the branch is not found in the configuration.
+        ClickException: If the branch is not found in the configuration.
     """
     try:
         index = CONFIG.branches.index(branch)
@@ -267,6 +313,18 @@ def get_upstream_branch(branch: str) -> Optional[str]:
         return CONFIG.branches[index - 1]
     else:
         return None
+
+
+def current_rev() -> str:
+    return git("rev-parse", "HEAD", stdout=subprocess.PIPE).stdout.strip()
+
+
+def branch_exists(branch: str) -> bool:
+    try:
+        git("rev-parse", "--verify", branch, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError:
+        return False
+    return True
 
 
 def get_latest_commit(remote: Optional[str], branch_name: str) -> str:
@@ -284,13 +342,13 @@ def get_latest_commit(remote: Optional[str], branch_name: str) -> str:
         subprocess.CalledProcessError: If the git command fails.
     """
     if remote:
-        git("fetch", "origin", branch_name)
+        git("fetch", remote, branch_name)
     return git(
         "rev-parse", join(remote, branch_name), stdout=subprocess.PIPE
     ).stdout.strip()
 
 
-def get_tag_for_branch(branch: str, project: str) -> tuple[str, str]:
+def get_tag_for_branch(branch: str, folder: str) -> tuple[str, str]:
     """
     Determine the appropriate new tag for a given branch based on the latest changes.
 
@@ -299,6 +357,7 @@ def get_tag_for_branch(branch: str, project: str) -> tuple[str, str]:
 
     Args:
         branch: The name of the branch for which to generate the tag.
+        folder: The folder within the repo that controls the tag.
 
     Returns:
         The new tag to be created, and its increment type
@@ -312,9 +371,7 @@ def get_tag_for_branch(branch: str, project: str) -> tuple[str, str]:
     increment = "patch"
 
     # Only apply minor increment beta
-    if branch == CONFIG.beta and Gitlab.is_first_commit_since_promotion(
-        CONFIG.beta, project
-    ):
+    if branch == CONFIG.beta and Gitlab.is_pending_bump(CONFIG.beta, folder):
         increment = "minor"
 
     args = [f"--increment={increment}"]
@@ -328,7 +385,7 @@ def get_tag_for_branch(branch: str, project: str) -> tuple[str, str]:
     output = subprocess.check_output(
         ["cz", "bump"] + list(args) + ["--dry-run", "--yes"],
         text=True,
-        cwd=project,
+        cwd=folder,
     )
     match = re.search("tag to create: (.*)", output)
 
@@ -380,17 +437,18 @@ def get_modified_projects(base_rev: str | None = None) -> list[str]:
         base_rev = Gitlab.get_base_rev()
 
     # Compare the current commit with the branch you want to merge with:
+    # FIXME: do not included deleted files
     result = git(
         "diff-tree", "--name-only", "-r", base_rev, "HEAD", stdout=subprocess.PIPE
     )
     all_files = result.stdout.strip().splitlines()
-    if all_files:
-        if CONFIG.verbose:
+    if CONFIG.verbose:
+        if all_files:
             click.echo(f"Modified files between {base_rev} and HEAD:")
-        for path in all_files:
-            click.echo(f" {path}")
-    elif CONFIG.verbose:
-        click.echo(f"No modified files between {base_rev} and HEAD")
+            for path in all_files:
+                click.echo(f" {path}")
+        else:
+            click.echo(f"No modified files between {base_rev} and HEAD")
 
     # FIXME: limit this to items in get_projects()
     return sorted(set(os.path.dirname(x) for x in all_files))
@@ -399,7 +457,7 @@ def get_modified_projects(base_rev: str | None = None) -> list[str]:
 @click.group()
 @click.option("--config", "-c", "config_path", type=str)
 @click.option("--verbose", "-v", is_flag=True, default=False)
-def cli(config_path, verbose):
+def cli(config_path: str, verbose: bool):
     set_config(load_config(config_path, verbose))
 
 
@@ -421,14 +479,15 @@ def autotag(annotation, base_rev):
     branch = current_branch()
     remote = Gitlab.get_remote()
 
-    projects = get_modified_projects(base_rev)
-    if projects:
-        for project_name in projects:
+    project_folders = get_modified_projects(base_rev)
+    if project_folders:
+        for project_folder in project_folders:
             # Auto-tag
-            tag, increment = get_tag_for_branch(branch, project_name)
+            tag, increment = get_tag_for_branch(branch, project_folder)
 
             # NOTE: this delay is necessary to create stable sorting of tags
             # because git's time resolution is 1s (same as unix timestamp).
+            # https://stackoverflow.com/questions/28237043/what-is-the-resolution-of-gits-commit-date-or-author-date-timestamps
             time.sleep(1.1)
 
             click.echo(f"Creating new tag: {tag} on branch: {branch} {time.time()}")
@@ -436,12 +495,12 @@ def autotag(annotation, base_rev):
 
             if increment == "minor" and branch == CONFIG.beta:
                 # FIXME: we may want to roll this back if push fails
-                Gitlab.set_pending_state(branch, project_name, False)
+                Gitlab.set_pending_bump_state(branch, project_folder, False)
 
             # FIXME: we may want to push all tags at once
             if remote:
                 click.echo(f"Pushing {tag} to remote")
-                git("push", "origin", tag)
+                git("push", remote, tag)
     else:
         click.echo("No tags generated!", err=True)
 
@@ -480,7 +539,7 @@ def hotfix() -> None:
         # Fetch the upstream branch
         git("fetch", remote, upstream_branch)
 
-    base_rev = checkout(remote, upstream_branch)
+    base_rev = checkout(remote, upstream_branch, create=True)
 
     msg = HOTFIX_MESSAGE.format(upstream_branch=upstream_branch, message=message)
     click.echo(msg)
@@ -495,13 +554,11 @@ def hotfix() -> None:
     if remote:
         # this will trigger a full pipeline for upstream_branch, and potentially another auto-merge
         click.echo(f"Pushing {upstream_branch} to {remote}")
-        git(
-            "push",
-            remote,
-            upstream_branch,
-            "-o",
-            f"ci.variable=GITFLOW_TAG_ANNOTATION={msg}",
-        )
+        if remote == GITLAB_REMOTE:
+            push_opts = ["-o", f"ci.variable=MONOFLOW_AUTOTAG_ANNOTATION={msg}"]
+        else:
+            push_opts = []
+        git("push", remote, upstream_branch, *push_opts)
     else:
         autotag.callback(msg, base_rev)
         # local mode: cleanup
@@ -518,12 +575,11 @@ def promote() -> None:
     for the presence of the branch, merges, and pushes changes.
     """
     remote = Gitlab.get_remote()
-    click.echo(f"remote = {remote}")
-    if remote:
-        click.echo(f"fetching remote = {remote}")
-        git("fetch", remote)
+    if CONFIG.verbose:
+        click.echo(f"remote = {remote}")
 
-    all_branches = get_branches()
+    # FIXME: this is returning sha's instead of branch names in CI
+    # all_branches = get_branches()
 
     def promote_branch(branch: str, log_msg: str):
         """
@@ -533,35 +589,52 @@ def promote() -> None:
 
         The branch is left checked out.
         """
-        click.echo(log_msg)
         upstream_branch = get_upstream_branch(branch)
         # FIXME: raise an error by default if branch does not exist?  provide option to allow this only during bootstrapping/testing
-        if upstream_branch and upstream_branch not in all_branches:
-            click.echo(
-                f"upstream_branch '{upstream_branch}' is not in all_branches: [{all_branches}]",
-                err=True,
-            )
-            return
+        # if upstream_branch and upstream_branch not in all_branches:
+        #     click.echo(
+        #         f"upstream_branch '{upstream_branch}' is not in all_branches: [{all_branches}]",
+        #         err=True,
+        #     )
+        #     return
+        if remote:
+            click.echo(f"fetching {remote}")
+            git("fetch", remote, branch)
 
-        base_rev = checkout(remote, branch, create=branch not in all_branches)
+        base_rev = checkout(remote, branch, create=True)
 
         if upstream_branch:
+            if remote:
+                git("fetch", remote, upstream_branch)
             git("merge", join(remote, upstream_branch), "-m", f"{log_msg}")
 
         if remote:
             # Trigger test/tag jobs for these new versions, but skip auto-hotfix
-            git(
+            args = [
                 "push",
                 "--atomic",
                 remote,
                 branch,
-                "-o",
-                "ci.variable=GITFLOW_SKIP_HOTFIX=true",
-                "-o",
-                f"ci.variable=GITFLOW_TAG_ANNOTATION={log_msg}",
-            )
-        else:
-            if upstream_branch:
+            ]
+            if remote == GITLAB_REMOTE:
+                args.extend(
+                    [
+                        "-o",
+                        "ci.variable=MONOFLOW_SKIP_HOTFIX=true",
+                        "-o",
+                        f"ci.variable=MONOFLOW_AUTOTAG_ANNOTATION={log_msg}",
+                    ]
+                )
+            git(*args)
+            if remote == LOCAL_REMOTE:
+                if upstream_branch and base_rev != current_rev():
+                    command = {
+                        "annotation": log_msg,
+                        "base_rev": base_rev,
+                        "branch": branch,
+                    }
+                    click.echo(f"Trigger: {json.dumps(command)}")
+            elif not remote:
                 autotag.callback(log_msg, base_rev)
 
     # Promotion time!
@@ -585,8 +658,8 @@ def promote() -> None:
     # Note: we do not make a beta tag at this time. Instead, we wait for the first commit on the
     # CONFIG.beta branch to do so.
     for project_name in get_projects():
-        Gitlab.set_pending_state(CONFIG.beta, project_name, True)
+        Gitlab.set_pending_bump_state(CONFIG.beta, project_name, True)
 
 
 if __name__ == "__main__":
-    cli()
+    cli(auto_envvar_prefix="MONOFLOW")

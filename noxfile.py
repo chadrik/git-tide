@@ -9,10 +9,6 @@ import shutil
 HERE = os.path.dirname(__file__)
 
 
-def addargs(session: nox.Session, *args: str) -> tuple[str, ...]:
-    return args + (session.posargs or ())
-
-
 @nox.session(reuse_venv=True)
 def build(session: nox.Session) -> None:
     session.install("poetry")
@@ -117,7 +113,7 @@ def unit_tests(session: nox.Session) -> None:
     Args:
         session (nox.Session): The Nox session being run, providing context and methods for session actions.
     """
-    session.install("pytest==8.1.1")
+    session.install("pytest==8.1.1", "python-gitlab")
     session.install("-e", ".")
 
     # Default arguments for pytest
@@ -230,6 +226,14 @@ def docs(session: nox.Session) -> None:
         session.run("mkdocs", "serve", "--dev-addr", "localhost:8000")
 
 
+def monoflow(session: nox.Session, *args: str) -> None:
+    if "CI" in os.environ:
+        session.install("-e", ".")
+    else:
+        session.install(".")
+    session.run("python", "-m", "monoflow", *(list(args) + session.posargs))
+
+
 @nox.session(tags=["ci"], reuse_venv=True)
 def autotag(session: nox.Session):
     """
@@ -241,8 +245,7 @@ def autotag(session: nox.Session):
     This session uses command-line arguments to define the annotation for the tag and uses the Commitizen tool
     to determine the next tag based on conventional commits. It then tags the branch and pushes the tag to the remote.
     """
-    session.install("-e", ".")
-    session.run(*addargs(session, "monoflow", "autotag"))
+    monoflow(session, "autotag")
 
 
 @nox.session(tags=["ci"], reuse_venv=True)
@@ -257,8 +260,7 @@ def hotfix(session: nox.Session) -> None:
     current branch. If conflicts arise, the session logs the conflicts and fails. If successful,
     it pushes the changes to the remote.
     """
-    session.install("-e", ".")
-    session.run(*addargs(session, "monoflow", "hotfix"))
+    monoflow(session, "hotfix")
 
 
 @nox.session(tags=["ci"], reuse_venv=True)
@@ -273,5 +275,4 @@ def promote(session: nox.Session) -> None:
     and triggering deployment/testing pipelines with new versions. Each branch promotion checks
     for the presence of the branch, merges, and pushes changes.
     """
-    session.install("-e", ".")
-    session.run(*addargs(session, "monoflow", "promote"))
+    monoflow(session, "promote")
