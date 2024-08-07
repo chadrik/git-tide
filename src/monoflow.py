@@ -1,6 +1,7 @@
 from __future__ import absolute_import, print_function, annotations
 
 import base64
+import fnmatch
 import os
 import pathlib
 import re
@@ -9,7 +10,6 @@ import time
 import json
 
 import click
-import requests
 
 try:
     import tomli as tomlllib  # noqa: F401
@@ -20,7 +20,7 @@ from functools import cache
 
 
 ENVVAR_PREFIX = "MONOFLOW"
-PROMOTION_PENDING_VAR = "MONOFLOW_MINOR_BUMP_PENDING_{}_{}"
+PROMOTION_BASE_MSG = "promotion base"
 HOTFIX_MESSAGE = "auto-hotfix into {upstream_branch}: {message}"
 HERE = os.path.dirname(__file__)
 CONFIG: Config
@@ -115,64 +115,6 @@ class Gitlab:
         return os.environ["CI_COMMIT_BEFORE_SHA"]
 
     @classmethod
-    def is_pending_bump(cls, branch: str, folder: str) -> bool:
-        """
-        Return whether the given branch and folder combination are awaiting a minor bump.
-
-        Args:
-            branch: one of the registered gitflow branches
-            folder: folder within the repo that defines commitizen tag rules
-
-        Returns:
-            whether it is pending or not
-        """
-        # FIXME: handle slashes in the folder name.  base64 encoding?
-        key = PROMOTION_PENDING_VAR.format(branch, folder)
-        try:
-            state = os.environ[key]
-            return state == "true"
-        except KeyError:
-            # if the variable has not been set we assume this repo is brand new
-            return True
-
-    @classmethod
-    def set_pending_bump_state(cls, branch: str, folder: str, state: bool) -> None:
-        """
-        Store a state for whether the given project on the given branch needs to have a minor bump.
-
-        If it is true for a given branch, then get_tag_for_branch() will return a minor increment.
-        After this, autotag() will set the pending state to False until.
-
-        This pending state is reset to True after each promotion event.
-
-        Args:
-            branch: one of the registered gitflow branches
-            folder: folder within the repo that defines commitizen tag rules
-            state: whether it is pending or not
-
-        Raises:
-            HTTPError: If the HTTP request to update or create the variable fails.
-        """
-        remote = Gitlab.get_remote()
-
-        if remote == GITLAB_REMOTE:
-            headers = {
-                "PRIVATE-TOKEN": os.environ["ACCESS_TOKEN"],
-            }
-            base_url = f"{os.environ['CI_API_V4_URL']}/projects/{os.environ['CI_PROJECT_ID']}/variables"
-            data = {"value": "true" if state else "false"}
-            key = PROMOTION_PENDING_VAR.format(branch, folder)
-
-            put_response = requests.put(
-                base_url + f"/{key}", headers=headers, data=data
-            )
-
-            if put_response.status_code == 404:
-                data["key"] = key
-                post_response = requests.post(base_url, headers=headers, data=data)
-                post_response.raise_for_status()
-
-    @classmethod
     @cache
     def _setup_remote(cls, url: str) -> None:
         try:
@@ -183,8 +125,8 @@ class Gitlab:
                 "See https://docs.gitlab.com/ee/ci/variables/#for-a-project"
             )
 
-        git("config", "user.email", "fake@email.com")
-        git("config", "user.name", "ci-bot")
+        git("config", "user.email", os.environ["GITLAB_USER_EMAIL"])
+        git("config", "user.name", os.environ["GITLAB_USER_NAME"])
         url = url.split("@")[-1]
         git("remote", "add", GITLAB_REMOTE, f"https://oauth2:{access_token}@{url}")
 
@@ -213,6 +155,17 @@ class Gitlab:
         return GITLAB_REMOTE
 
 
+def cz(*args: str, folder: str | None = None):
+    if CONFIG.verbose:
+        click.echo(args)
+    output = subprocess.check_output(
+        ["cz"] + list(args),
+        text=True,
+        cwd=folder,
+    )
+    return output
+
+
 def git(*args: str, **kwargs) -> subprocess.CompletedProcess:
     """
     Execute a git command with the specified arguments.
@@ -231,6 +184,33 @@ def git(*args: str, **kwargs) -> subprocess.CompletedProcess:
     if CONFIG.verbose:
         click.echo(args)
     return subprocess.run(args, text=True, check=True, **kwargs)
+
+
+def get_tags(
+    pattern: str | None = None, start_rev: str = "HEAD", end_rev: str | None = None
+) -> list[str]:
+    """
+    Return all of the tags in the Git repository.
+
+    Args:
+        pattern: glob pattern for tag names
+        start_rev: list tags reachable from this commit
+        end_rev: list tags up until this commit
+    """
+    args = ["log", "--tags", "--format=%D", start_rev]
+    if end_rev:
+        args.extend(["--not", end_rev])
+
+    lines = git(*args, stdout=subprocess.PIPE).stdout.strip().splitlines()
+    tags = []
+    for line in lines:
+        parts = line.split(", ")
+        for part in parts:
+            if part.startswith("tag: "):
+                tag = part[5:]
+                if pattern is None or fnmatch.fnmatch(tag, pattern):
+                    tags.append(tag)
+    return tags
 
 
 def current_branch() -> str:
@@ -269,7 +249,7 @@ def checkout(remote: str | None, branch: str, create: bool = False) -> str:
     Check out a specific branch, optionally creating it if it doesn't exist.
 
     Args:
-        remote: The name of the remote repository.
+        remote: The remote repository name
         branch: The branch name to check out.
         create: Whether to create the branch if it does not exist (default is False).
     """
@@ -332,8 +312,8 @@ def get_latest_commit(remote: str | None, branch_name: str) -> str:
     Fetch the latest commit hash from a specific branch.
 
     Args:
-        branch_name (str): The name of the branch to fetch the latest commit from.
-        remote (str | None): The name of the remote repository. If None, the local repository is used.
+        remote: The remote repository name
+        branch_name: The name of the branch to fetch the latest commit from.
 
     Returns:
         str: The latest commit hash of the specified branch.
@@ -348,7 +328,87 @@ def get_latest_commit(remote: str | None, branch_name: str) -> str:
     ).stdout.strip()
 
 
-def get_tag_for_branch(branch: str, folder: str) -> tuple[str, str]:
+def is_pending_bump(remote: str, branch: str, folder: str) -> bool:
+    """
+    Return whether the given branch and folder combination are awaiting a minor bump.
+
+    Args:
+        remote: The remote repository name
+        branch: one of the registered gitflow branches
+        folder: folder within the repo that defines commitizen tag rules
+
+    Returns:
+        whether it is pending or not
+    """
+    from commitizen.config import read_cfg
+    from commitizen.providers import ScmProvider
+
+    # FIXME: support rc?
+    if branch != CONFIG.beta:
+        return False
+
+    # Find the closest promotion note to the current beta branch
+    promotion_rev = get_promotion_marker(remote)
+    if promotion_rev is None:
+        click.echo("No promote marker found")
+        return True
+
+    cwd = os.getcwd()
+    os.chdir(folder)
+    try:
+        # Use the matching logic from commitizen, which will read the commitizen
+        # config file for us (note: it supports more than just pyproject.toml).
+        provider = ScmProvider(read_cfg())
+        matcher = provider._tag_format_matcher()
+        if CONFIG.verbose:
+            click.echo(f"Found promotion base rev: {promotion_rev}")
+        # List any tags for this project folder between beta branch and the promotion note
+        all_tags = get_tags(end_rev=promotion_rev)
+        tags = [t for t in all_tags if matcher(t)]
+        return not tags
+    finally:
+        os.chdir(cwd)
+
+
+def get_promotion_marker(remote) -> str | None:
+    """
+    Get the hash for the most recent promotion commit.
+    """
+    git("fetch", remote, "refs/notes/*:refs/notes/*")
+    output = git("log", "--format=%H %N", "-n20", stdout=subprocess.PIPE).stdout
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(" ", 1)
+        if len(parts) == 1:
+            continue
+        print(parts)
+        if parts[1] == PROMOTION_BASE_MSG:
+            return parts[0]
+    return None
+
+
+def set_promotion_marker(remote: str, branch: str) -> None:
+    """
+    Store a state for whether the given project on the given branch needs to have a minor bump.
+
+    If it is true for a given branch, then get_tag_for_branch() will return a minor increment.
+    After this, autotag() will set the pending state to False until.
+
+    This pending state is reset to True after each promotion event.
+
+    Args:
+        remote: The remote repository name
+        branch: one of the registered gitflow branches
+    """
+    git("fetch", remote, "refs/notes/*:refs/notes/*")
+    # FIXME: forcing here, because the same commit can be the promotion base more than once.  should we skip?
+    git("notes", "add", "--force", "-m", PROMOTION_BASE_MSG, branch)
+    git("push", remote, "refs/notes/*")
+
+
+def get_tag_for_branch(remote: str, branch: str, folder: str) -> str:
     """
     Determine the appropriate new tag for a given branch based on the latest changes.
 
@@ -356,11 +416,12 @@ def get_tag_for_branch(branch: str, folder: str) -> tuple[str, str]:
     adjusting for pre-release tags and minor version increments.
 
     Args:
+        remote: The remote repository name
         branch: The name of the branch for which to generate the tag.
         folder: The folder within the repo that controls the tag.
 
     Returns:
-        The new tag to be created, and its increment type
+        The new tag to be created
 
     Raises:
         RuntimeError: If the command does not generate an output or fails to determine the tag.
@@ -371,7 +432,7 @@ def get_tag_for_branch(branch: str, folder: str) -> tuple[str, str]:
     increment = "patch"
 
     # Only apply minor increment beta
-    if branch == CONFIG.beta and Gitlab.is_pending_bump(CONFIG.beta, folder):
+    if is_pending_bump(remote, branch, folder):
         increment = "minor"
 
     args = [f"--increment={increment}"]
@@ -382,11 +443,7 @@ def get_tag_for_branch(branch: str, folder: str) -> tuple[str, str]:
         args += ["--increment-mode=exact"]
 
     # run this in the project directory so that the pyproject.toml is accessible.
-    output = subprocess.check_output(
-        ["cz", "bump"] + list(args) + ["--dry-run", "--yes"],
-        text=True,
-        cwd=folder,
-    )
+    output = cz(*(["bump"] + list(args) + ["--dry-run", "--yes"]), folder=folder)
     match = re.search("tag to create: (.*)", output)
 
     if not match:
@@ -394,7 +451,7 @@ def get_tag_for_branch(branch: str, folder: str) -> tuple[str, str]:
 
     tag = match.group(1).strip()
 
-    return tag, increment
+    return tag
 
 
 def join(remote: str | None, branch: str) -> str:
@@ -402,7 +459,7 @@ def join(remote: str | None, branch: str) -> str:
     Construct a full branch path with remote prefix if specified.
 
     Args:
-        remote: The remote repository name, or None if local.
+        remote: The remote repository name
         branch: The branch name.
 
     Returns:
@@ -483,7 +540,7 @@ def autotag(annotation, base_rev):
     if project_folders:
         for project_folder in project_folders:
             # Auto-tag
-            tag, increment = get_tag_for_branch(branch, project_folder)
+            tag = get_tag_for_branch(remote, branch, project_folder)
 
             # NOTE: this delay is necessary to create stable sorting of tags
             # because git's time resolution is 1s (same as unix timestamp).
@@ -492,10 +549,6 @@ def autotag(annotation, base_rev):
 
             click.echo(f"Creating new tag: {tag} on branch: {branch} {time.time()}")
             git("tag", "-a", tag, "-m", annotation)
-
-            if increment == "minor" and branch == CONFIG.beta:
-                # FIXME: we may want to roll this back if push fails
-                Gitlab.set_pending_bump_state(branch, project_folder, False)
 
             # FIXME: we may want to push all tags at once
             if remote:
@@ -657,8 +710,7 @@ def promote() -> None:
 
     # Note: we do not make a beta tag at this time. Instead, we wait for the first commit on the
     # CONFIG.beta branch to do so.
-    for project_name in get_projects():
-        Gitlab.set_pending_bump_state(CONFIG.beta, project_name, True)
+    set_promotion_marker(remote, CONFIG.beta)
 
 
 if __name__ == "__main__":
