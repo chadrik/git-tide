@@ -1,9 +1,0 @@
-[project]
-name = "projectB"
-
-[tool.commitizen]
-name = "cz_conventional_commits"
-tag_format = "projectB-$version"
-version_scheme = "pep440"
-version_provider = "scm"
-major_version_zero = false

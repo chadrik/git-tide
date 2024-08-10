@@ -25,24 +25,24 @@ from pathlib import Path
 from collections import defaultdict
 from _pytest.monkeypatch import MonkeyPatch
 from unittest.mock import MagicMock, patch, call
-from typing import Generator
+from typing import Generator, Literal, overload
 
 import click
 
 from monoflow import (
     checkout,
-    current_branch,
     get_branches,
     get_latest_commit,
     current_rev,
-    Gitlab,
+    GitlabBackend,
+    TestGitlabBackend,
     get_upstream_branch,
     git,
     join,
     load_config,
     set_config,
     Config,
-    LOCAL_REMOTE,
+    GITLAB_REMOTE,
 )
 
 REMOTE_MODE = os.environ.get("REMOTE_MODE", "false").lower() in ("true", "1")
@@ -54,7 +54,7 @@ if REMOTE_MODE:
         print("Must set ACCESS_TOKEN env var before running nox")
         raise
 else:
-    ACCESS_TOKEN = None
+    ACCESS_TOKEN = "dummy-access-token"
 
 # set this to reuse an existing Gitlab remote during testing
 FORCE_GITLAB_REMOTE = os.environ.get("FORCE_GITLAB_REMOTE")
@@ -65,7 +65,7 @@ HERE = os.path.dirname(__file__)
 PROJECTS = ["projectA", "projectB"]
 # Git timestamps are limited to unix timestamp resolution: 1s
 DELAY = 1.1
-VERBOSE = False
+VERBOSE = os.environ.get("VERBOSE", "false").lower() in ("true", "1")
 
 
 def all_tags(pattern: str | None = None) -> list[str]:
@@ -75,16 +75,9 @@ def all_tags(pattern: str | None = None) -> list[str]:
     Args:
         pattern: glob pattern for tag names
     """
-    tags = (
-        git(
-            "tag",
-            "--sort=-creatordate",
-            "--format=%(tag)  %(creatordate)",
-            stdout=subprocess.PIPE,
-        )
-        .stdout.strip()
-        .splitlines()
-    )
+    tags = git(
+        "tag", "--sort=-creatordate", "--format=%(tag)  %(creatordate)", capture=True
+    ).splitlines()
     if VERBOSE:
         for tag in tags:
             print(tag)
@@ -110,9 +103,7 @@ def latest_tag(pattern: str | None = None) -> str:
     if pattern:
         return all_tags(pattern)[0]
     else:
-        return git(
-            "describe", "--tags", "--abbrev=0", stdout=subprocess.PIPE
-        ).stdout.strip()
+        return git("describe", "--tags", "--abbrev=0", capture=True)
 
 
 @pytest.fixture
@@ -150,10 +141,12 @@ def gitlab_project():
                 private_token=ACCESS_TOKEN,
                 retry_transient_errors=True,
             )
+            # FIXME: set the default branch here?
             project = gl.projects.create(
                 {
                     "name": f"semver-demo-{uuid.uuid4()}",
                     "visibility_level": gitlab.const.Visibility.PRIVATE,
+                    "ci_push_repository_for_job_token_allowed": True,
                 }
             )
     else:
@@ -179,10 +172,10 @@ def gitlab_project():
 @dataclasses.dataclass
 class GitlabData:
     project: gitlab.v4.objects.Project
-    schedule: gitlab.v4.objects.ProjectPipelineSchedule
 
     @property
     def remote(self) -> str:
+        """https git url"""
         return self.project.http_url_to_repo
 
 
@@ -223,18 +216,28 @@ def setup_git_repo(
         "pyproject.toml",
         ".gitlab-ci.yml",
         "requirements.txt",
-        "src/monoflow.py",
+        "src/monoflow.py",  # for
     ]
 
     for file in files_to_copy:
         dest = Path(tmpdir_str).joinpath(file)
-        os.makedirs(dest.parent, exist_ok=True)
+        dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(Path(parent_directory).joinpath(file), dest)
 
-    for folder in PROJECTS:
-        shutil.copytree(
-            os.path.join(parent_directory, folder), os.path.join(tmpdir_str, folder)
-        )
+    for project in PROJECTS:
+        dest = Path(tmpdir_str).joinpath(project)
+        dest.mkdir(parents=True, exist_ok=True)
+        dest.joinpath("pyproject.toml").write_text(f"""\
+[project]
+name = "{project}"
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+tag_format = "{project}-$version"
+version_scheme = "pep440"
+version_provider = "scm"
+major_version_zero = false
+""")
 
     config = set_config(
         load_config(os.path.join(tmpdir_str, "pyproject.toml"), verbose=VERBOSE)
@@ -246,13 +249,14 @@ def setup_git_repo(
     # Add all files and commit them
     message = "initial state"
     git("add", ".")
-    git("commit", "-m", message, stdout=subprocess.PIPE).stdout.strip()
+    git("commit", "-m", message, capture=True)
     rev = current_rev()
     git("checkout", "--detach", rev)
 
-    monkeypatch.delenv("CI_REPOSITORY_URL", raising=False)
-
     if gitlab_project:
+        remote_data = GitlabData(gitlab_project)
+        push_opts = ["-o", "ci.skip"]
+
         if FORCE_GITLAB_REMOTE:
             # cleanup
             for schedule in gitlab_project.pipelineschedules.list(get_all=True):
@@ -267,14 +271,14 @@ def setup_git_repo(
             p_branch.allow_force_push = True
             p_branch.save()
 
-        gitlab_project.variables.create({"key": "ACCESS_TOKEN", "value": ACCESS_TOKEN})
-        remote_data = GitlabData(gitlab_project, None)
-        push_opts = ["-o", "ci.skip"]
+            push_opts.append("-f")
+
     else:
-        monkeypatch.setenv("ACCESS_TOKEN", "some-value")
+        # FIXME: move this to gitlab_project
+        # this is a stand-in for the remote repository for local testing
         local_remote = tempfile.TemporaryDirectory()
         os.chdir(local_remote.name)
-        git("init", "--bare")
+        git("init", "--bare", "-b", config.stable)
         os.chdir(tmpdir_str)
         remote_data = LocalData(local_remote)
         push_opts = []
@@ -290,38 +294,21 @@ def setup_git_repo(
             git("push", "origin", "--delete", *tags)
         git("prune")
 
-    git("fetch", "--all")
-    git("branch", "-la")
-    git("remote", "-v")
-
-    # push branches
-    for branch in config.branches:
-        git("branch", "-f", branch, rev)
-        git("checkout", branch)
-        git("push", "-f", "--set-upstream", "origin", branch, *push_opts)
+    _monoflow("init", "--access-token", ACCESS_TOKEN, "--remote=origin")
 
     # make initial tags
     for project in PROJECTS:
         git("tag", "-a", f"{project}-1.0.0", "-m", message)
         time.sleep(DELAY)
 
+    if FORCE_GITLAB_REMOTE:
+        for branch in config.branches:
+            git("branch", "-f", branch, rev)
+
     print_git_graph()
 
     git("push", "-f", "--all", *push_opts)
     git("push", "-f", "--tags", *push_opts)
-
-    if isinstance(remote_data, GitlabData):
-        # this must happen after the branch has been created in the remote and initial commit pushed
-        schedule = gitlab_project.pipelineschedules.create(
-            {
-                "ref": config.rc,
-                "description": "Promote",
-                "cron": "6 6 * * 4",
-                "active": False,
-            }
-        )
-        schedule.variables.create({"key": "SCHEDULED_JOB_NAME", "value": "promote"})
-        remote_data.schedule = schedule
 
     # Yield the directory path to allow tests to run in this environment
     yield tmpdir_str, config, remote_data
@@ -338,6 +325,7 @@ def create_file_and_commit(
 
     Args:
         message: The commit message.
+        folder: Sub-folder within the project. The folder should contain a pyproject.toml.
         filename: The name of the file to be created. If not provided, a UUID will be generated.
 
     Returns:
@@ -389,9 +377,7 @@ def get_tags_with_annotations() -> list[str]:
 
     tag_order = []
     for tag in tags:
-        annotation = git(
-            "tag", "-n", "--format=%(subject)", tag, stdout=subprocess.PIPE
-        ).stdout.strip()
+        annotation = git("tag", "-n", "--format=%(subject)", tag, capture=True)
         if not annotation:
             print(f"No annotation message found for tag {tag}")
             continue
@@ -411,15 +397,15 @@ def git_graph() -> str:
         "--format=format:%C(white)%s%C(reset) %C(dim white)- %C(auto)%d%C(reset)",
         "--all",
         "--decorate",
-        stdout=subprocess.PIPE,
-    ).stdout.strip()
+        capture=True,
+    )
 
 
-def print_git_graph():
+def print_git_graph() -> None:
     """
     Prints the git graph in color, for debugging purposes
     """
-    return git(
+    git(
         "log",
         "--graph",
         "--abbrev-commit",
@@ -531,7 +517,19 @@ def wait_for_job(
     raise RuntimeError("Job failed to complete")
 
 
-def _monoflow(*args: str) -> str:
+@overload
+def _monoflow(*args: str, capture: Literal[True]) -> str:
+    pass
+
+
+@overload
+def _monoflow(*args: str) -> subprocess.CompletedProcess[str]:
+    pass
+
+
+def _monoflow(
+    *args: str, capture: bool = False
+) -> str | subprocess.CompletedProcess[str]:
     cmd = [
         sys.executable,
         "-m",
@@ -539,11 +537,15 @@ def _monoflow(*args: str) -> str:
     ]
     if VERBOSE:
         cmd.append("--verbose")
-    output = subprocess.run(
-        cmd + list(args), check=True, text=True, stdout=subprocess.PIPE
-    ).stdout
-    print(output)
-    return output
+    cmd.extend(args)
+    if capture:
+        output = subprocess.run(
+            cmd, check=True, text=True, stdout=subprocess.PIPE
+        ).stdout.strip()
+        print(output)
+        return output
+    else:
+        return subprocess.run(cmd, text=True, check=True)
 
 
 def run_autotag(
@@ -559,15 +561,14 @@ def run_autotag(
     Args:
         branch: branch that triggered the pipeline
         remote_data: Dataclass corresponding to the remote being used
-        annotation (str): A custom annotation message for the git tag. Defaults to "automatic change detected".
+        annotation: A custom annotation message for the git tag. Defaults to "automatic change detected".
+        wait: block until the Gitlab job completes.
 
     This function runs a command that automates the process of tagging the current commit in the git repository.
     """
     if annotation is None:
         # get from the commit message.  this mimics the behavior of gitlab-ci.yml
-        annotation = git(
-            "log", "--pretty=format:%s", "-n1", stdout=subprocess.PIPE
-        ).stdout.strip()
+        annotation = git("log", "--pretty=format:%s", "-n1", capture=True)
 
     print(f"Running autotag: {annotation=}, {base_rev=}")
     if isinstance(remote_data, GitlabData):
@@ -607,18 +608,12 @@ def run_promote(
     checks out the specified branch, and triggers the 'promote' command.
     """
     if isinstance(remote_data, GitlabData):
-        try:
-            remote_data.schedule.play()
-        except gitlab.exceptions.GitlabPipelinePlayError as err:
-            # schedule id can become stale?
-            print(err)
-            schedules = remote_data.project.pipelineschedules.list(get_all=True)
-            for mayabe_schedule in schedules:
-                if mayabe_schedule.description == "Promote":
-                    mayabe_schedule.play()
-                    break
-            else:
-                raise RuntimeError("Could not find Promote schedule")
+        # schedule id can become stale?
+        schedule = GitlabBackend._find_promote_job(remote_data.project)
+        if schedule:
+            schedule.play()
+        else:
+            raise RuntimeError("Could not find Promote schedule")
         job = find_pipeline_job(
             remote_data.project,
             re.compile("^promote$"),
@@ -630,7 +625,7 @@ def run_promote(
         return None
 
     time.sleep(DELAY)
-    output = _monoflow("promote")
+    output = _monoflow("promote", capture=True)
     tag_args = []
     for line in output.splitlines():
         if line.startswith("Trigger: "):
@@ -676,6 +671,8 @@ def pipeline(
         description: Description of the pipeline for debugging purposes
         remote_data: Dataclass corresponding to the remote being used
         monkeypatch: The pytest monkeypatch fixture for setting environment variables.
+        base_rev: The git revision that represents the commit before the commit for
+            the Gitlab pipeline
 
     Returns:
         None
@@ -696,12 +693,7 @@ def pipeline(
 
         if not base_rev:
             try:
-                base_rev = git(
-                    "rev-parse",
-                    "HEAD^",
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                ).stdout.strip()
+                base_rev = git("rev-parse", "HEAD^", capture=True)
             except subprocess.CalledProcessError:
                 base_rev = "0000000000000000000000000000000000000000"
 
@@ -716,10 +708,10 @@ def pipeline(
         os.chdir(tmpdir)
         git("init", "-b", branch)
         # FIXME: in Gitlab the "origin" is configured, and the only branch that exists is the remote trigger branch
-        git("remote", "add", LOCAL_REMOTE, remote_data.remote)
-        git("fetch", "--quiet", LOCAL_REMOTE, latest_commit)
+        git("remote", "add", GITLAB_REMOTE, remote_data.remote)
+        git("fetch", "--quiet", GITLAB_REMOTE, latest_commit)
         # in Gitlab all tags exist
-        git("fetch", "--quiet", LOCAL_REMOTE, "--tags")
+        git("fetch", "--quiet", GITLAB_REMOTE, "--tags")
         git("checkout", "--detach", latest_commit)
 
         print()
@@ -820,7 +812,7 @@ def pipeline(
 
 
 @pytest.mark.unit
-def test_join_with_remote():
+def test_join_with_remote() -> None:
     # Given a remote name and a branch
     remote = "origin"
     branch = "main"
@@ -834,7 +826,7 @@ def test_join_with_remote():
 
 
 @pytest.mark.unit
-def test_join_without_remote():
+def test_join_without_remote() -> None:
     # Given no remote name and a branch
     remote = None
     branch = "main"
@@ -848,7 +840,7 @@ def test_join_without_remote():
 
 
 @pytest.mark.unit
-def test_get_upstream_branch_with_valid_branch(config):
+def test_get_upstream_branch_with_valid_branch(config) -> None:
     branch = config.stable
     expected_upstream = config.rc
 
@@ -858,7 +850,7 @@ def test_get_upstream_branch_with_valid_branch(config):
 
 
 @pytest.mark.unit
-def test_get_upstream_branch_with_first_branch(config):
+def test_get_upstream_branch_with_first_branch(config) -> None:
     branch = config.beta
     expected_upstream = None
 
@@ -868,7 +860,7 @@ def test_get_upstream_branch_with_first_branch(config):
 
 
 @pytest.mark.unit
-def test_get_upstream_branch_with_invalid_branch(config, monkeypatch):
+def test_get_upstream_branch_with_invalid_branch(config, monkeypatch) -> None:
     invalid_branch = "abc123"
 
     monkeypatch.setattr(config, "branches", [])
@@ -879,7 +871,7 @@ def test_get_upstream_branch_with_invalid_branch(config, monkeypatch):
 
 
 @pytest.mark.unit
-def test_get_upstream_branch_with_empty_branches(config, monkeypatch):
+def test_get_upstream_branch_with_empty_branches(config, monkeypatch) -> None:
     monkeypatch.setattr(config, "branches", [])
     with pytest.raises(click.ClickException) as excinfo:
         get_upstream_branch(config.beta)
@@ -888,7 +880,7 @@ def test_get_upstream_branch_with_empty_branches(config, monkeypatch):
 
 
 @pytest.mark.unit
-def test_checkout_existing_branch():
+def test_checkout_existing_branch() -> None:
     remote = "origin"
     branch = "main"
 
@@ -904,7 +896,7 @@ def test_checkout_existing_branch():
 
 
 @pytest.mark.unit
-def test_checkout_new_branch():
+def test_checkout_new_branch() -> None:
     remote = "origin"
     branch = "feature/123"
     create = True
@@ -922,7 +914,7 @@ def test_checkout_new_branch():
 
 
 @pytest.mark.unit
-def test_checkout_local_branch():
+def test_checkout_local_branch() -> None:
     remote = None
     branch = "bugfix/456"
 
@@ -935,7 +927,7 @@ def test_checkout_local_branch():
 
 
 @pytest.mark.unit
-def test_checkout_local_new_branch():
+def test_checkout_local_new_branch() -> None:
     remote = None
     branch = "feature/789"
     create = True
@@ -953,7 +945,7 @@ def test_checkout_local_new_branch():
 
 
 @pytest.mark.unit
-def test_checkout_git_command_failure():
+def test_checkout_git_command_failure() -> None:
     remote = "origin"
     branch = "main"
 
@@ -964,7 +956,7 @@ def test_checkout_git_command_failure():
 
 
 @pytest.mark.unit
-def test_get_branches():
+def test_get_branches() -> None:
     expected_branches = ["main", "feature/123", "bugfix/456"]
     mocked_stdout = "\n".join([f"  {branch}" for branch in expected_branches])
 
@@ -977,7 +969,7 @@ def test_get_branches():
 
 
 @pytest.mark.unit
-def test_get_branches_empty():
+def test_get_branches_empty() -> None:
     mocked_stdout = ""
 
     with patch("monoflow.git") as mock_git:
@@ -989,7 +981,7 @@ def test_get_branches_empty():
 
 
 @pytest.mark.unit
-def test_get_branches_git_command_failure():
+def test_get_branches_git_command_failure() -> None:
     with patch("monoflow.git") as mock_git:
         mock_git.side_effect = subprocess.CalledProcessError(1, "git")
         with pytest.raises(subprocess.CalledProcessError):
@@ -999,25 +991,11 @@ def test_get_branches_git_command_failure():
 @pytest.mark.unit
 def test_current_branch_in_ci_environment():
     with patch.dict("os.environ", {"CI_COMMIT_BRANCH": "beta"}):
-        assert current_branch() == "beta"
+        assert GitlabBackend.current_branch() == "beta"
 
 
 @pytest.mark.unit
-def test_current_branch_in_local_environment():
-    with patch.dict("os.environ", {}, clear=True):
-        with patch("monoflow.git") as mock_git:
-            mock_result = MagicMock(spec=subprocess.CompletedProcess)
-            mock_result.stdout = "beta"
-            mock_git.return_value = mock_result
-            branch = current_branch()
-            mock_git.assert_called_once_with(
-                "branch", "--show-current", stdout=subprocess.PIPE
-            )
-            assert branch == "beta"
-
-
-@pytest.mark.unit
-def test_get_latest_commit_with_remote():
+def test_get_latest_commit_with_remote() -> None:
     branch_name = "main"
     remote = "origin"
     expected_commit_hash = "abcdef123456"
@@ -1034,7 +1012,7 @@ def test_get_latest_commit_with_remote():
 
 
 @pytest.mark.unit
-def test_get_latest_commit_without_remote():
+def test_get_latest_commit_without_remote() -> None:
     branch_name = "main"
     remote = None
     expected_commit_hash = "abcdef123456"
@@ -1048,7 +1026,7 @@ def test_get_latest_commit_without_remote():
 
 
 @pytest.mark.unit
-def test_get_latest_commit_git_command_failure():
+def test_get_latest_commit_git_command_failure() -> None:
     branch_name = "main"
     remote = "origin"
 
@@ -1146,7 +1124,7 @@ def test_get_latest_commit_git_command_failure():
 
 
 @pytest.mark.unit
-def test_get_remote_in_ci_environment():
+def test_get_remote_in_ci_environment() -> None:
     url = "https://gitlab-ci-token:[MASKED]@gitlab.example.com/someproject/"
 
     with patch.dict("os.environ", {"CI_REPOSITORY_URL": url, "ACCESS_TOKEN": "abc123"}):
@@ -1155,67 +1133,36 @@ def test_get_remote_in_ci_environment():
             mock_result.returncode = 0
             mock_git.return_value = mock_result
 
-            assert Gitlab.get_remote() == "gitlab_origin"
+            assert GitlabBackend.get_remote() == "gitlab_origin"
 
 
 @pytest.mark.unit
-def test_get_remote_in_local_environment():
+def test_get_remote_in_local_environment() -> None:
     with patch.dict("os.environ", {}, clear=True):
-        assert Gitlab.get_remote() == LOCAL_REMOTE
+        assert TestGitlabBackend.get_remote() == GITLAB_REMOTE
 
 
 @pytest.mark.unit
-def test_get_current_branch_in_ci_environment():
+def test_get_current_branch_in_ci_environment() -> None:
     with patch.dict("os.environ", {"CI_COMMIT_BRANCH": "beta"}):
-        assert current_branch() == "beta"
+        assert GitlabBackend.current_branch() == "beta"
 
 
 @pytest.mark.unit
-def test_get_current_branch_in_local_environment():
+def test_get_current_branch_in_local_environment() -> None:
     with patch.dict("os.environ", {}, clear=True):
         with patch("monoflow.git") as mock_git:
             mock_result = MagicMock()
             mock_result.stdout.strip.return_value = "main"
             mock_git.return_value = mock_result
 
-            from monoflow import current_branch
-
-            branch = current_branch()
+            branch = TestGitlabBackend.current_branch()
             assert branch == "main"
 
 
-# @pytest.mark.unit
-# def test_load_gitflow_config():
-#     # Mocked content of the pyproject.toml file
-#     mocked_toml_content = b"""
-#     [tool.gitflow]
-#     first_tag = "1.0.0"
-#     [tool.gitflow.branches]
-#     master = "main"
-#     develop = "beta"
-#     [tool.gitflow.prereleases]
-#     beta = "beta"
-#     rc = "rc"
-#     """
-#
-#     # Expected result
-#     expected_config = {
-#         "first_tag": "1.0.0",
-#         "branches": {"master": "main", "develop": "beta"},
-#         "prereleases": {"beta": "beta", "rc": "rc"},
-#     }
-#
-#     # FIXME: this test would be more meaningful if it actually used tomllib.
-#     #  This is barely testing anything.
-#     # Mocking the open function and the tomllib.load function
-#     with patch("builtins.open", mock_open(read_data=mocked_toml_content)), patch(
-#         "tomllib.load", return_value=tomllib.loads(mocked_toml_content.decode("utf-8"))
-#     ):
-#         config = load_config()
-#         assert config == expected_config
-
-
-def _run_autotag_jobs(tmp_path_factory, tag_args: list[dict], remote_data, monkeypatch):
+def _run_autotag_jobs(
+    tmp_path_factory, tag_args: list[dict], remote_data, monkeypatch
+) -> None:
     """
     Execute one or more autotag pipelines.
 

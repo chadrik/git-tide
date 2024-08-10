@@ -113,8 +113,10 @@ def unit_tests(session: nox.Session) -> None:
     Args:
         session (nox.Session): The Nox session being run, providing context and methods for session actions.
     """
-    session.install("pytest==8.1.1", "python-gitlab")
-    session.install("-e", ".")
+    session.install("pytest==8.1.1")
+    # [init] extra (i.e. gitlab) is not installed by default because it's a heavy dep
+    # that slows down Gitlab jobs
+    session.install("-e", ".[init]")
 
     # Default arguments for pytest
     default_args = ["-v"]
@@ -141,7 +143,7 @@ def smoke_tests(session: nox.Session) -> None:
         session (nox.Session): The Nox session being run, providing context and methods for session actions.
     """
     session.install("pytest==8.1.1")
-    session.install("-e", ".")
+    session.install("-e", ".[init]")
 
     # Default arguments for pytest, runs all tests marked with 'smoke'
     default_args = ["-v", "-m", "smoke"]
@@ -227,6 +229,7 @@ def docs(session: nox.Session) -> None:
 
 
 def monoflow(session: nox.Session, *args: str) -> None:
+    # do not install the [init] extras
     if "CI" in os.environ:
         session.install("-e", ".")
     else:
