@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "monoflow"
 packages = [
-    { include = "monoflow.py", from = "src" },
+    { include = "monoflow", from = "src" },
 ]
 version = "0.1.0"
 description = "CLI for gitflow-style branching in a monorepo"
@@ -17,7 +17,7 @@ python-gitlab = { version = "4.8.0", optional = true }
 init = ["python-gitlab"]
 
 [tool.poetry.scripts]
-autogitflow = "autogitflow:cli"
+monoflow = "monoflow:cli"
 
 [build-system]
 requires = ["poetry-core"]
@@ -25,7 +25,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.mypy]
 exclude = '''^(venv|\.ruff_cache|\.nox|\.pytest_cache|\.mypy_cache)/'''
-files = ["noxfile.py", "src/monoflow.py"]
+files = ["noxfile.py", "src"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -35,7 +35,6 @@ markers = [
 ]
 
 [tool.monoflow]
-first_tag = "0.1.0b0"
 branches.beta = "develop"
 branches.rc = "staging"
 branches.stable = "master"

@@ -119,11 +119,7 @@ def unit_tests(session: nox.Session) -> None:
     session.install("-e", ".[init]")
 
     # Default arguments for pytest
-    default_args = ["-v"]
-
-    # If no additional arguments are provided, add the "-m unit" option
-    if not session.posargs:
-        default_args.extend(["-m", "unit"])
+    default_args = ["-v", "-m", "unit"]
 
     # Combine default arguments with any additional args provided
     pytest_args = default_args + list(session.posargs)

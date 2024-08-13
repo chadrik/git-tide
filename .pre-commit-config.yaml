@@ -1,6 +1,7 @@
 exclude: '^(.git/|.nox/|.idea/|.pytest_cache/|.ruff_cache/|venv/)'
 
 repos:
+  # FIXME: use pre-commit repos instead of calling nox
   - repo: local
     hooks:
       - id: ruff-lint

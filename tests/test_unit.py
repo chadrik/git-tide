@@ -24,21 +24,24 @@ from urllib.parse import urlparse, urlunparse
 from pathlib import Path
 from collections import defaultdict
 from _pytest.monkeypatch import MonkeyPatch
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import patch, call
 from typing import Generator, Literal, overload
 
 import click
 
-from monoflow import (
+from monoflow.gitutils import (
     checkout,
     get_branches,
     get_latest_commit,
     current_rev,
-    GitlabBackend,
-    TestGitlabBackend,
-    get_upstream_branch,
     git,
     join,
+)
+
+from monoflow.core import (
+    GitlabBackend,
+    get_upstream_branch,
+    get_modified_projects,
     load_config,
     set_config,
     Config,
@@ -174,7 +177,7 @@ class GitlabData:
     project: gitlab.v4.objects.Project
 
     @property
-    def remote(self) -> str:
+    def remote_url(self) -> str:
         """https git url"""
         return self.project.http_url_to_repo
 
@@ -184,7 +187,7 @@ class LocalData:
     tempdir: tempfile.TemporaryDirectory
 
     @property
-    def remote(self) -> str:
+    def remote_url(self) -> str:
         return self.tempdir.name
 
 
@@ -205,27 +208,35 @@ def setup_git_repo(
     This setup includes copying essential project files, creating an initial commit, and simulating
     an autotag process. It cleans up by removing the .git directory after tests are done.
     """
-    tmpdir_str = str(tmpdir)
-    print(f"Git repo: {tmpdir_str}")
-    os.chdir(tmpdir_str)
+    tmp_path = Path(str(tmpdir))
+    print(f"Git repo: {tmp_path}")
+    os.chdir(tmp_path)
 
-    parent_directory = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    parent_directory = Path(
+        os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    )
     files_to_copy = [
         "noxfile.py",
         ".gitignore",
         "pyproject.toml",
         ".gitlab-ci.yml",
         "requirements.txt",
-        "src/monoflow.py",  # for
+        "src",
     ]
 
-    for file in files_to_copy:
-        dest = Path(tmpdir_str).joinpath(file)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(Path(parent_directory).joinpath(file), dest)
+    for relpath in files_to_copy:
+        src = parent_directory.joinpath(relpath)
+        dest = tmp_path.joinpath(relpath)
+        if src.is_file():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(src, dest)
+        elif src.is_dir():
+            shutil.copytree(src, dest)
+        else:
+            raise TypeError(src)
 
     for project in PROJECTS:
-        dest = Path(tmpdir_str).joinpath(project)
+        dest = tmp_path.joinpath(project)
         dest.mkdir(parents=True, exist_ok=True)
         dest.joinpath("pyproject.toml").write_text(f"""\
 [project]
@@ -240,7 +251,7 @@ major_version_zero = false
 """)
 
     config = set_config(
-        load_config(os.path.join(tmpdir_str, "pyproject.toml"), verbose=VERBOSE)
+        load_config(str(tmp_path.joinpath("pyproject.toml")), verbose=VERBOSE)
     )
 
     # Initialize the git repository
@@ -279,11 +290,11 @@ major_version_zero = false
         local_remote = tempfile.TemporaryDirectory()
         os.chdir(local_remote.name)
         git("init", "--bare", "-b", config.stable)
-        os.chdir(tmpdir_str)
+        os.chdir(tmp_path)
         remote_data = LocalData(local_remote)
         push_opts = []
 
-    git("remote", "add", "origin", remote_data.remote)
+    git("remote", "add", "origin", remote_data.remote_url)
 
     if FORCE_GITLAB_REMOTE:
         # cleanup remote tags
@@ -311,7 +322,7 @@ major_version_zero = false
     git("push", "-f", "--tags", *push_opts)
 
     # Yield the directory path to allow tests to run in this environment
-    yield tmpdir_str, config, remote_data
+    yield str(tmp_path), config, remote_data
 
     if isinstance(remote_data, LocalData):
         remote_data.tempdir.cleanup()
@@ -359,7 +370,6 @@ def configure_environment(key: str, value: str, monkeypatch) -> None:
         None
     """
     monkeypatch.setenv(key, value)
-    monkeypatch.delenv("CI_REPOSITORY_URL", raising=False)
 
 
 def get_tags_with_annotations() -> list[str]:
@@ -652,6 +662,19 @@ def run_hotfix(branch: str, remote_data: GitlabData | LocalData) -> None:
     _monoflow("hotfix")
 
 
+def setup_runner_env(
+    monkeypatch, remote_url: str, latest_commit: str, base_rev: str, branch: str
+):
+    configure_environment("CI_REPOSITORY_URL", remote_url, monkeypatch)
+    configure_environment("CI_PIPELINE_SOURCE", "push", monkeypatch)
+    configure_environment("CI_COMMIT_SHA", latest_commit, monkeypatch)
+    configure_environment("CI_COMMIT_BEFORE_SHA", base_rev, monkeypatch)
+    configure_environment("CI_COMMIT_BRANCH", branch, monkeypatch)
+    configure_environment("ACCESS_TOKEN", "abc123", monkeypatch)
+    configure_environment("GITLAB_USER_EMAIL", "foo@bar.com", monkeypatch)
+    configure_environment("GITLAB_USER_NAME", "fakeuser", monkeypatch)
+
+
 @contextlib.contextmanager
 def pipeline(
     tmp_path_factory,
@@ -697,10 +720,9 @@ def pipeline(
             except subprocess.CalledProcessError:
                 base_rev = "0000000000000000000000000000000000000000"
 
-        configure_environment("CI_PIPELINE_SOURCE", "push", monkeypatch)
-        configure_environment("CI_COMMIT_SHA", latest_commit, monkeypatch)
-        configure_environment("CI_COMMIT_BEFORE_SHA", base_rev, monkeypatch)
-        configure_environment("CI_COMMIT_BRANCH", branch, monkeypatch)
+        setup_runner_env(
+            monkeypatch, remote_data.remote_url, latest_commit, base_rev, branch
+        )
 
         tmpdir: Path = tmp_path_factory.mktemp(branch)
         print("created temporary directory", tmpdir)
@@ -708,7 +730,7 @@ def pipeline(
         os.chdir(tmpdir)
         git("init", "-b", branch)
         # FIXME: in Gitlab the "origin" is configured, and the only branch that exists is the remote trigger branch
-        git("remote", "add", GITLAB_REMOTE, remote_data.remote)
+        git("remote", "add", GITLAB_REMOTE, remote_data.remote_url)
         git("fetch", "--quiet", GITLAB_REMOTE, latest_commit)
         # in Gitlab all tags exist
         git("fetch", "--quiet", GITLAB_REMOTE, "--tags")
@@ -812,6 +834,21 @@ def pipeline(
 
 
 @pytest.mark.unit
+def test_get_modified_projects(config) -> None:
+    # Note: we patch core.git and not gitutils.git, bc it's already imported
+    with patch("monoflow.core.git") as mock_git, patch(
+        "monoflow.core.get_projects"
+    ) as mock_get_projects:
+        mock_git.return_value = "\n".join(
+            [
+                "projectA/path.py",
+            ]
+        )
+        mock_get_projects.return_value = [Path("projectA"), Path("projectB")]
+        assert get_modified_projects(base_rev="fake") == [Path("projectA")]
+
+
+@pytest.mark.unit
 def test_join_with_remote() -> None:
     # Given a remote name and a branch
     remote = "origin"
@@ -884,13 +921,13 @@ def test_checkout_existing_branch() -> None:
     remote = "origin"
     branch = "main"
 
-    with patch("monoflow.git") as mock_git:
+    with patch("monoflow.gitutils.git") as mock_git:
         checkout(remote, branch)
 
     mock_git.assert_has_calls(
         [
             call("branch", f"--set-upstream-to={remote}/{branch}"),
-            call("rev-parse", branch, stdout=subprocess.PIPE),
+            call("rev-parse", branch, capture=True),
         ]
     )
 
@@ -901,14 +938,14 @@ def test_checkout_new_branch() -> None:
     branch = "feature/123"
     create = True
 
-    with patch("monoflow.git") as mock_git:
+    with patch("monoflow.gitutils.git") as mock_git:
         checkout(remote, branch, create)
 
     mock_git.assert_has_calls(
         [
-            call("rev-parse", "--verify", branch, stderr=subprocess.PIPE),
+            call("rev-parse", "--verify", branch, quiet=True),
             call("branch", f"--set-upstream-to={remote}/{branch}"),
-            call("rev-parse", branch, stdout=subprocess.PIPE),
+            call("rev-parse", branch, capture=True),
         ]
     )
 
@@ -918,11 +955,11 @@ def test_checkout_local_branch() -> None:
     remote = None
     branch = "bugfix/456"
 
-    with patch("monoflow.git") as mock_git:
+    with patch("monoflow.gitutils.git") as mock_git:
         checkout(remote, branch)
 
     mock_git.assert_has_calls(
-        [call("checkout", branch), call("rev-parse", branch, stdout=subprocess.PIPE)]
+        [call("checkout", branch), call("rev-parse", branch, capture=True)]
     )
 
 
@@ -932,14 +969,14 @@ def test_checkout_local_new_branch() -> None:
     branch = "feature/789"
     create = True
 
-    with patch("monoflow.git") as mock_git:
+    with patch("monoflow.gitutils.git") as mock_git:
         checkout(remote, branch, create)
 
     mock_git.assert_has_calls(
         [
-            call("rev-parse", "--verify", branch, stderr=subprocess.PIPE),
+            call("rev-parse", "--verify", branch, quiet=True),
             call("checkout", branch),
-            call("rev-parse", branch, stdout=subprocess.PIPE),
+            call("rev-parse", branch, capture=True),
         ]
     )
 
@@ -949,7 +986,7 @@ def test_checkout_git_command_failure() -> None:
     remote = "origin"
     branch = "main"
 
-    with patch("monoflow.git") as mock_git:
+    with patch("monoflow.gitutils.git") as mock_git:
         mock_git.side_effect = subprocess.CalledProcessError(1, "git")
         with pytest.raises(subprocess.CalledProcessError):
             checkout(remote, branch)
@@ -960,38 +997,38 @@ def test_get_branches() -> None:
     expected_branches = ["main", "feature/123", "bugfix/456"]
     mocked_stdout = "\n".join([f"  {branch}" for branch in expected_branches])
 
-    with patch("monoflow.git") as mock_git:
-        mock_git.return_value.stdout = mocked_stdout
+    with patch("monoflow.gitutils.git") as mock_git:
+        mock_git.return_value = mocked_stdout
         branches = get_branches()
 
     assert branches == expected_branches
-    mock_git.assert_called_once_with("branch", stdout=subprocess.PIPE)
+    mock_git.assert_called_once_with("branch", capture=True)
 
 
 @pytest.mark.unit
 def test_get_branches_empty() -> None:
     mocked_stdout = ""
 
-    with patch("monoflow.git") as mock_git:
-        mock_git.return_value.stdout = mocked_stdout
+    with patch("monoflow.gitutils.git") as mock_git:
+        mock_git.return_value = mocked_stdout
         branches = get_branches()
 
     assert branches == []
-    mock_git.assert_called_once_with("branch", stdout=subprocess.PIPE)
+    mock_git.assert_called_once_with("branch", capture=True)
 
 
 @pytest.mark.unit
 def test_get_branches_git_command_failure() -> None:
-    with patch("monoflow.git") as mock_git:
+    with patch("monoflow.gitutils.git") as mock_git:
         mock_git.side_effect = subprocess.CalledProcessError(1, "git")
         with pytest.raises(subprocess.CalledProcessError):
             get_branches()
 
 
 @pytest.mark.unit
-def test_current_branch_in_ci_environment():
-    with patch.dict("os.environ", {"CI_COMMIT_BRANCH": "beta"}):
-        assert GitlabBackend.current_branch() == "beta"
+def test_current_branch_in_ci_environment(monkeypatch):
+    setup_runner_env(monkeypatch, "fakeurl", "fakecommit", "basebaserev", "beta")
+    assert GitlabBackend.current_branch() == "beta"
 
 
 @pytest.mark.unit
@@ -1000,15 +1037,13 @@ def test_get_latest_commit_with_remote() -> None:
     remote = "origin"
     expected_commit_hash = "abcdef123456"
 
-    with patch("monoflow.git") as mock_git:
-        mock_git.return_value.stdout = expected_commit_hash + "\n"
+    with patch("monoflow.gitutils.git") as mock_git:
+        mock_git.return_value = expected_commit_hash
         commit_hash = get_latest_commit(remote, branch_name)
 
     assert commit_hash == expected_commit_hash
     mock_git.assert_any_call("fetch", "origin", branch_name)
-    mock_git.assert_called_with(
-        "rev-parse", f"{remote}/{branch_name}", stdout=subprocess.PIPE
-    )
+    mock_git.assert_called_with("rev-parse", f"{remote}/{branch_name}", capture=True)
 
 
 @pytest.mark.unit
@@ -1017,12 +1052,12 @@ def test_get_latest_commit_without_remote() -> None:
     remote = None
     expected_commit_hash = "abcdef123456"
 
-    with patch("monoflow.git") as mock_git:
-        mock_git.return_value.stdout = expected_commit_hash + "\n"
+    with patch("monoflow.gitutils.git") as mock_git:
+        mock_git.return_value = expected_commit_hash
         commit_hash = get_latest_commit(remote, branch_name)
 
     assert commit_hash == expected_commit_hash
-    mock_git.assert_called_once_with("rev-parse", branch_name, stdout=subprocess.PIPE)
+    mock_git.assert_called_once_with("rev-parse", branch_name, capture=True)
 
 
 @pytest.mark.unit
@@ -1030,7 +1065,7 @@ def test_get_latest_commit_git_command_failure() -> None:
     branch_name = "main"
     remote = "origin"
 
-    with patch("monoflow.git") as mock_git:
+    with patch("monoflow.gitutils.git") as mock_git:
         mock_git.side_effect = subprocess.CalledProcessError(1, "git")
         with pytest.raises(subprocess.CalledProcessError):
             get_latest_commit(remote, branch_name)
@@ -1124,40 +1159,20 @@ def test_get_latest_commit_git_command_failure() -> None:
 
 
 @pytest.mark.unit
-def test_get_remote_in_ci_environment() -> None:
+def test_get_remote_in_ci_environment(monkeypatch) -> None:
     url = "https://gitlab-ci-token:[MASKED]@gitlab.example.com/someproject/"
 
-    with patch.dict("os.environ", {"CI_REPOSITORY_URL": url, "ACCESS_TOKEN": "abc123"}):
-        with patch("monoflow.git") as mock_git:
-            mock_result = MagicMock()
-            mock_result.returncode = 0
-            mock_git.return_value = mock_result
+    setup_runner_env(monkeypatch, url, "fakecommit", "basebaserev", "beta")
+    with patch("monoflow.gitutils.git") as mock_git:
+        mock_git.return_value = None
 
-            assert GitlabBackend.get_remote() == "gitlab_origin"
+        assert GitlabBackend.get_remote() == "gitlab_origin"
 
 
 @pytest.mark.unit
-def test_get_remote_in_local_environment() -> None:
-    with patch.dict("os.environ", {}, clear=True):
-        assert TestGitlabBackend.get_remote() == GITLAB_REMOTE
-
-
-@pytest.mark.unit
-def test_get_current_branch_in_ci_environment() -> None:
-    with patch.dict("os.environ", {"CI_COMMIT_BRANCH": "beta"}):
-        assert GitlabBackend.current_branch() == "beta"
-
-
-@pytest.mark.unit
-def test_get_current_branch_in_local_environment() -> None:
-    with patch.dict("os.environ", {}, clear=True):
-        with patch("monoflow.git") as mock_git:
-            mock_result = MagicMock()
-            mock_result.stdout.strip.return_value = "main"
-            mock_git.return_value = mock_result
-
-            branch = TestGitlabBackend.current_branch()
-            assert branch == "main"
+def test_get_current_branch_in_ci_environment(monkeypatch) -> None:
+    setup_runner_env(monkeypatch, "fakeurl", "fakecommit", "basebaserev", "beta")
+    assert GitlabBackend.current_branch() == "beta"
 
 
 def _run_autotag_jobs(
