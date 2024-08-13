@@ -188,7 +188,6 @@ class Backend:
             if branch_exists(remote_branch):
                 git("branch", f"--set-upstream-to={remote_branch}", branch)
             else:
-                # FIXME: when passing --no-local it's probably not safe to skip this part
                 git("push", "--set-upstream", remote_name, branch, *push_opts)
 
     @classmethod
@@ -604,6 +603,8 @@ def init(
     This command must be run from a git repo, and the repo must have the Gitlab project setup
     as a remote, either by being cloned from it, or via `git remote add`.
     """
+    import tempfile
+
     backend = get_backend()
     if is_url(remote):
         init_local = False
@@ -621,6 +622,16 @@ def init(
 
     if init_local:
         backend.init_local_repo(remote)
+    else:
+        # we may still need to create branches in the remote, so create a dummy clone
+        with tempfile.TemporaryDirectory() as tmpdir:
+            git("clone", f"--branch={CONFIG.stable}", "--depth=0", remote_url, tmpdir)
+            pwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                backend.init_local_repo("origin")
+            finally:
+                os.chdir(pwd)
 
 
 @cli.command()
