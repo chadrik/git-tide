@@ -123,6 +123,14 @@ def config() -> Config:
 
 @pytest.fixture
 def gitlab_project():
+    """
+    Create a Gitlab project with a randomized name if REMOTE_MODE is enabled.
+
+    Uses GITLAB_API_URL which defaults to gitlab.com.
+
+    In the cleanup phase, this deletes old projects, but preserves at most KEEP_OLD_GITLAB_PROJECTS
+    number of projects for debugging.
+    """
     if REMOTE_MODE:
         # private token or personal token authentication (self-hosted GitLab instance)
         if FORCE_GITLAB_REMOTE:
@@ -446,6 +454,13 @@ def find_pipeline_job(
 ) -> gitlab.v4.objects.ProjectJob:
     """
     Return a Gitlab job matching the given search parameters.
+
+    Args:
+        gitlab_project: Project object from the gitlab python API
+        job_name_pattern: look for jobs whose name matches this regex
+        rev: look for jobs running on the given git revision
+        source: look for jobs triggered by this source event
+        updated_after: look for jobs created or modified after this time
     """
     tries = 20
     while tries:
@@ -491,23 +506,27 @@ def find_pipeline_job(
 
 
 def wait_for_job(
-    gitlab_project: gitlab.v4.objects.Project, job: gitlab.v4.objects.ProjectJob
+    gitlab_project: gitlab.v4.objects.Project, gitlab_job: gitlab.v4.objects.ProjectJob
 ):
     """
     Wait for the given job to complete
+
+    Args:
+        gitlab_project: Project object from the gitlab python API
+        gitlab_job: ProjectJob object from the gitlab python API
     """
     tries = 40
     while tries:
-        print(f"{job.name} status: {job.status}")
-        if job.status == "success":
+        print(f"{gitlab_job.name} status: {gitlab_job.status}")
+        if gitlab_job.status == "success":
             return
-        elif job.status in ["failed", "skipped"]:
-            job.pprint()
-            raise RuntimeError(f"Job {job.status}")
+        elif gitlab_job.status in ["failed", "skipped"]:
+            gitlab_job.pprint()
+            raise RuntimeError(f"Job {gitlab_job.status}")
         time.sleep(5.0)
-        job = gitlab_project.jobs.get(job.id)
+        gitlab_job = gitlab_project.jobs.get(gitlab_job.id)
         tries -= 1
-    job.pprint()
+    gitlab_job.pprint()
     raise RuntimeError("Job failed to complete")
 
 
@@ -1442,12 +1461,12 @@ def test_dev_cycle(setup_git_repo, monkeypatch) -> None:
             {
                 "annotation": "promoting staging to master!",
                 "base_rev": None,
-                "branch": "master",
+                "branch": config.stable,
             },
             {
                 "annotation": "promoting develop to staging!",
                 "base_rev": None,
-                "branch": "staging",
+                "branch": config.rc,
             },
         ]
 
@@ -1484,7 +1503,7 @@ def test_dev_cycle(setup_git_repo, monkeypatch) -> None:
             {
                 "annotation": "promoting staging to master!",
                 "base_rev": None,
-                "branch": "master",
+                "branch": config.stable,
             }
         ]
 
