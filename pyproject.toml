@@ -27,6 +27,8 @@ build-backend = "poetry.core.masonry.api"
 exclude = '''^(venv|\.ruff_cache|\.nox|\.pytest_cache|\.mypy_cache)/'''
 files = ["noxfile.py", "src"]
 ignore_missing_imports = true
+show_error_codes = true
+disallow_untyped_defs = true
 
 [tool.pytest.ini_options]
 markers = [

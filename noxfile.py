@@ -234,7 +234,7 @@ def monoflow(session: nox.Session, *args: str) -> None:
 
 
 @nox.session(tags=["ci"], reuse_venv=True)
-def autotag(session: nox.Session):
+def autotag(session: nox.Session) -> None:
     """
     Automatically tag the current branch with a new version number and push the tag to the remote repository.
 

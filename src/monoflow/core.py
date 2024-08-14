@@ -11,7 +11,7 @@ import click
 try:
     import tomli as tomllib  # noqa: F401
 except ImportError:
-    import tomllib
+    import tomllib  # type: ignore[no-redef]
 from pathlib import Path
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -40,7 +40,7 @@ def is_url(s: str) -> bool:
     return "://" in s
 
 
-def load_config(path=None, verbose: bool = False) -> Config:
+def load_config(path: str | None = None, verbose: bool = False) -> Config:
     """
     Load and return the GitFlow configuration from the pyproject.toml file.
 
@@ -53,10 +53,10 @@ def load_config(path=None, verbose: bool = False) -> Config:
         raise click.ClickException("No pyproject.toml found")
 
     with open(path, "rb") as f:
-        config = tomllib.load(f)
+        data = tomllib.load(f)
 
     try:
-        settings = config["tool"][TOOL_NAME]
+        settings = data["tool"][TOOL_NAME]
     except KeyError:
         raise click.ClickException(f"'tool.{TOOL_NAME}' section missing: {path}")
 
@@ -101,7 +101,7 @@ class Config:
     beta: str = "develop"  # FIXME: Make optional
     alpha: str | None = None  # FIXME: support alpha
     branches: list[str] = field(default_factory=list)
-    branch_to_prerelease: dict[str, str] = field(default_factory=dict)
+    branch_to_prerelease: dict[str, str | None] = field(default_factory=dict)
     verbose: bool = False
 
 
@@ -153,7 +153,7 @@ class Backend:
         """
 
     @classmethod
-    def init_local_repo(cls, remote_name: str):
+    def init_local_repo(cls, remote_name: str) -> None:
         """
         Setup the local repository.
 
@@ -206,10 +206,7 @@ class Backend:
 
 
 class GitlabBackend(Backend):
-    """Class to quarantine Gitlab-specific behavior
-
-    Eventually this can serve as an abstraction to support other CI systems
-    """
+    """Gitlab-specific behavior"""
 
     PROMOTION_SCHEDULED_JOB_NAME = "Promote Gitflow Branches"
 
@@ -328,7 +325,7 @@ class TestGitlabBackend(GitlabBackend):
         pass
 
 
-def cz(*args: str, folder: str | Path | None = None):
+def cz(*args: str, folder: str | Path | None = None) -> str:
     if CONFIG.verbose:
         click.echo(f"running {args} in {folder}")
     output = subprocess.check_output(
