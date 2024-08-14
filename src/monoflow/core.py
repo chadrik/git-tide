@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from urllib.parse import urlparse, urlunparse
 from abc import abstractmethod
+from enum import Enum
 
 from .gitutils import git, get_tags, branch_exists, checkout, current_rev, join, GitRepo
 
@@ -26,14 +27,24 @@ if False:
 
 TOOL_NAME = "monoflow"
 ENVVAR_PREFIX = TOOL_NAME.upper()
-BRANCH_ORDER = ["alpha", "beta", "rc", "stable"]
 PROMOTION_BASE_MSG = "promotion base"
-HOTFIX_MESSAGE = "auto-hotfix into {upstream_branch}: {message}"
 HERE = os.path.dirname(__file__)
 CONFIG: Config
 GITLAB_REMOTE = "gitlab_origin"
 
+# FIXME: add these to config file
+HOTFIX_MESSAGE = "auto-hotfix into {upstream_branch}: {message}"
+PROMOTION_CYCLE_START_MESSAGE = "starting new {release_id} cycle."
+PROMOTION_MESSAGE = "promoting {upstream_branch} to {branch}!"
+
 cache = lru_cache(maxsize=None)
+
+
+class ReleaseID(str, Enum):
+    alpha = "alpha"
+    beta = "beta"
+    rc = "rc"
+    stable = "stable"
 
 
 def is_url(s: str) -> bool:
@@ -69,22 +80,17 @@ def load_config(path: str | None = None, verbose: bool = False) -> Config:
 
     config = Config(verbose=verbose)
     # Loop through branches once and extract all needed information
-    for prerelease in BRANCH_ORDER:
-        branch_name = branches.get(prerelease)
+    for release_id in ReleaseID:
+        branch_name = branches.get(release_id.value)
         if branch_name is None:
-            if prerelease == "stable":
-                branch_name = "master"
-            else:
-                continue
+            continue
 
         # Append branch name to CONFIG.branches list
         config.branches.append(branch_name)
 
-        # Update CONFIG.branch_to_prerelease dictionary
-        config.branch_to_prerelease[branch_name] = (
-            None if prerelease == "stable" else prerelease
-        )
-        setattr(config, prerelease, branch_name)
+        # Update CONFIG.branch_to_release_id dictionary
+        config.branch_to_release_id[branch_name] = release_id
+        setattr(config, release_id.value, branch_name)
     return config
 
 
@@ -97,12 +103,22 @@ def set_config(config: Config) -> Config:
 @dataclass
 class Config:
     stable: str = "master"
-    rc: str = "staging"  # FIXME: Make optional
-    beta: str = "develop"  # FIXME: Make optional
+    rc: str | None = None
+    beta: str | None = None
     alpha: str | None = None  # FIXME: support alpha
+    # branches in order from most-experimental to stable
     branches: list[str] = field(default_factory=list)
-    branch_to_prerelease: dict[str, str | None] = field(default_factory=dict)
+    # branch name to pre-release name (alpha, beta, rc). None for stable.
+    branch_to_release_id: dict[str, ReleaseID] = field(default_factory=dict)
     verbose: bool = False
+
+    def start_branch(self) -> str:
+        """
+        Return the most experimental branch.
+
+        This branch corresponds to the earliest pre-release specified by the config.
+        """
+        return self.branches[0]
 
 
 def get_backend() -> type[Backend]:
@@ -173,7 +189,7 @@ class Backend:
             push_opts = []
 
         # setup branches.
-        # loop from stable to pre-release branches, bc we set all prerelease branches to
+        # loop from stable to pre-release branches, bc we set all release_id branches to
         # the location of stable
         for branch in reversed(CONFIG.branches):
             if branch_exists(branch):
@@ -375,7 +391,7 @@ def is_pending_bump(remote: str, branch: str, folder: Path) -> bool:
     from commitizen.config import read_cfg
     from commitizen.providers import ScmProvider
 
-    # FIXME: support rc?
+    # FIXME: support alpha and rc?
     if branch != CONFIG.beta:
         return False
 
@@ -460,7 +476,7 @@ def get_tag_for_branch(remote: str, branch: str, folder: Path) -> str:
     Raises:
         RuntimeError: If the command does not generate an output or fails to determine the tag.
     """
-    prerelease = CONFIG.branch_to_prerelease[branch]
+    release_id = CONFIG.branch_to_release_id[branch]
 
     increment = "patch"
 
@@ -469,8 +485,8 @@ def get_tag_for_branch(remote: str, branch: str, folder: Path) -> str:
         increment = "minor"
 
     args = [f"--increment={increment}"]
-    if prerelease:
-        args += ["--prerelease", prerelease]
+    if release_id != ReleaseID.stable:
+        args += ["--prerelease", release_id.value]
 
     if increment == "minor":
         args += ["--increment-mode=exact"]
@@ -738,7 +754,7 @@ def promote() -> None:
     if CONFIG.verbose:
         click.echo(f"remote = {remote}")
 
-    def promote_branch(branch: str, log_msg: str) -> None:
+    def promote_branch(branch: str, log_msg_template: str) -> None:
         """
         - Checkout the branch
         - Merge with the upstream branch, if it exists
@@ -747,15 +763,10 @@ def promote() -> None:
         The branch is left checked out.
         """
         upstream_branch = get_upstream_branch(branch)
-        log_msg = log_msg.format(branch=branch, upstream_branch=upstream_branch)
-
-        # FIXME: raise an error by default if branch does not exist?  provide option to allow this only during bootstrapping/testing
-        # if upstream_branch and upstream_branch not in all_branches:
-        #     click.echo(
-        #         f"upstream_branch '{upstream_branch}' is not in all_branches: [{all_branches}]",
-        #         err=True,
-        #     )
-        #     return
+        release_id = CONFIG.branch_to_release_id[branch]
+        log_msg = log_msg_template.format(
+            branch=branch, upstream_branch=upstream_branch, release_id=release_id.value
+        )
 
         if remote:
             click.echo(f"fetching {remote}")
@@ -799,24 +810,23 @@ def promote() -> None:
 
     # Promotion time!
 
-    # It doesn't matter what the active branch is when promote is run: the next thing that we do
-    # is check out CONFIG.stable.
-    promote_branch(
-        CONFIG.stable,
-        "promoting {upstream_branch} to {branch}!",
-    )
-    promote_branch(
-        CONFIG.rc,
-        "promoting {upstream_branch} to {branch}!",
-    )
-    promote_branch(
-        CONFIG.beta,
-        "starting new beta cycle.",
-    )
+    # loop from stable to most experimental
+    for branch in reversed(CONFIG.branches):
+        # It doesn't matter what the active branch is when promote is run: the next thing that we do
+        # is check out CONFIG.stable.
+        if branch == CONFIG.start_branch():
+            msg = PROMOTION_CYCLE_START_MESSAGE
+        else:
+            msg = PROMOTION_MESSAGE
+
+        promote_branch(
+            branch,
+            msg,
+        )
 
     # Note: we do not make a beta tag at this time. Instead, we wait for the first commit on the
     # CONFIG.beta branch to do so.
-    set_promotion_marker(remote, CONFIG.beta)
+    set_promotion_marker(remote, CONFIG.start_branch())
 
 
 @cli.command(name="projects")

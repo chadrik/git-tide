@@ -491,17 +491,6 @@ def find_pipeline_job(
     )
 
 
-# def retry(func: Callable, tries=5, msg="Failed") -> None:
-#     while tries:
-#         try:
-#             return func()
-#         except requests.exceptions.ConnectionError:
-#             pass
-#         time.sleep(1.0)
-#         tries -= 1
-#     raise RuntimeError(msg)
-
-
 def wait_for_job(
     gitlab_project: gitlab.v4.objects.Project, gitlab_job: gitlab.v4.objects.ProjectJob
 ):
@@ -1071,99 +1060,12 @@ def test_get_latest_commit_git_command_failure() -> None:
             get_latest_commit(remote, branch_name)
 
 
-# @pytest.mark.unit
-# def test_create_gitlab_ci_variable_success():
-#     # Test the function under successful conditions
-#     with patch("requests.post") as mock_post:
-#         mock_post.return_value = Mock(status_code=200)
-#         mock_post.return_value.raise_for_status = Mock()
-#
-#         try:
-#             create_gitlab_ci_variable(
-#                 "https://gitlab.example.com/api", "access-token", "NEW_VAR", "value123"
-#             )
-#             mock_post.assert_called_once_with(
-#                 "https://gitlab.example.com/api",
-#                 headers={"PRIVATE-TOKEN": "access-token"},
-#                 json={"key": "NEW_VAR", "value": "value123"},
-#             )
-#         except Exception as e:
-#             pytest.fail(f"Unexpected exception raised: {e}")
-
-
-# @pytest.mark.unit
-# def test_create_gitlab_ci_variable_http_error():
-#     # Test the function's response to HTTP errors
-#     with patch("requests.post") as mock_post:
-#         mock_post.return_value = Mock(status_code=400)
-#         mock_post.return_value.raise_for_status.side_effect = Exception("HTTP Error")
-#
-#         with pytest.raises(Exception, match="HTTP Error"):
-#             create_gitlab_ci_variable(
-#                 "https://gitlab.example.com/api", "access-token", "NEW_VAR", "value123"
-#             )
-
-
-# @pytest.mark.unit
-# def test_update_gitlab_ci_variable_success():
-#     with patch("requests.put") as mock_put, patch.dict(
-#         "os.environ",
-#         {
-#             "ACCESS_TOKEN": "fake_token",
-#             "CI_API_V4_URL": "https://gitlab.example.com/api",
-#             "CI_PROJECT_ID": "123",
-#         },
-#     ):
-#         mock_put.return_value = Mock(status_code=200)
-#         update_gitlab_ci_variable("TEST_KEY", "new_value")
-#         mock_put.assert_called_once_with(
-#             "https://gitlab.example.com/api/projects/123/variables/TEST_KEY",
-#             headers={"PRIVATE-TOKEN": "fake_token"},
-#             json={"value": "new_value"},
-#         )
-
-
-# @pytest.mark.unit
-# def test_update_gitlab_ci_variable_not_found():
-#     with patch("requests.put") as mock_put, patch(
-#         "monoflow.create_gitlab_ci_variable"
-#     ) as mock_create, patch.dict(
-#         "os.environ",
-#         {
-#             "ACCESS_TOKEN": "fake_token",
-#             "CI_API_V4_URL": "https://gitlab.example.com/api",
-#             "CI_PROJECT_ID": "123",
-#         },
-#     ):
-#         mock_put.return_value = Mock(status_code=404)
-#         update_gitlab_ci_variable("TEST_KEY", "new_value")
-#         mock_create.assert_called_once_with(
-#             "https://gitlab.example.com/api/projects/123/variables",
-#             "fake_token",
-#             "TEST_KEY",
-#             "new_value",
-#         )
-
-
-# @pytest.mark.unit
-# def test_update_gitlab_ci_variable_http_error():
-#     with patch.dict("os.environ", {"ACCESS_TOKEN": "fake_token"}):
-#         with patch("requests.put") as mock_put:
-#             mock_put.return_value = Mock(
-#                 status_code=500,
-#                 raise_for_status=Mock(side_effect=Exception("HTTP Error")),
-#             )
-#             with pytest.raises(Exception) as e:
-#                 update_gitlab_ci_variable("TEST_KEY", "new_value")
-#             assert "HTTP Error" in str(e.value)
-
-
 @pytest.mark.unit
 def test_get_remote_in_ci_environment(monkeypatch) -> None:
     url = "https://gitlab-ci-token:[MASKED]@gitlab.example.com/someproject/"
 
     setup_runner_env(monkeypatch, url, "fakecommit", "basebaserev", "beta")
-    with patch("monoflow.gitutils.git") as mock_git:
+    with patch("monoflow.core.git") as mock_git:
         mock_git.return_value = None
 
         assert GitlabBackend.get_remote() == "gitlab_origin"

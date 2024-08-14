@@ -28,14 +28,13 @@ def lint(session: nox.Session) -> None:
     Args:
         session (nox.Session): The Nox session being run, providing context and methods for session actions.
     """
-    session.install("-r", "pre-commit==3.6.2")
+    session.install("pre-commit==3.6.2")
     session.run(
         "pre-commit",
         "run",
         "--all-files",
         "--show-diff-on-failure",
         "--hook-stage=manual",
-        *session.posargs,
     )
 
 
