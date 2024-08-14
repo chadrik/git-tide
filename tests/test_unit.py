@@ -278,9 +278,14 @@ major_version_zero = false
             assert gitlab_project.variables.list(get_all=True) == []
 
             # allow force push
-            p_branch = gitlab_project.protectedbranches.get(config.beta)
-            p_branch.allow_force_push = True
-            p_branch.save()
+            for branch in config.branches:
+                try:
+                    p_branch = gitlab_project.protectedbranches.get(branch)
+                except gitlab.exceptions.GitlabGetError:
+                    pass
+                else:
+                    p_branch.allow_force_push = True
+                    p_branch.save()
 
             push_opts.append("-f")
 
@@ -608,7 +613,7 @@ def run_promote(
     """
     if isinstance(remote_data, GitlabData):
         # schedule id can become stale?
-        schedule = GitlabBackend._find_promote_job(remote_data.project)
+        schedule = GitlabBackend()._find_promote_job(remote_data.project)
         if schedule:
             schedule.play()
         else:
@@ -1017,7 +1022,7 @@ def test_get_branches_git_command_failure() -> None:
 @pytest.mark.unit
 def test_current_branch_in_ci_environment(monkeypatch):
     setup_runner_env(monkeypatch, "fakeurl", "fakecommit", "basebaserev", "beta")
-    assert GitlabBackend.current_branch() == "beta"
+    assert GitlabBackend().current_branch() == "beta"
 
 
 @pytest.mark.unit
@@ -1068,13 +1073,13 @@ def test_get_remote_in_ci_environment(monkeypatch) -> None:
     with patch("monoflow.core.git") as mock_git:
         mock_git.return_value = None
 
-        assert GitlabBackend.get_remote() == "gitlab_origin"
+        assert GitlabBackend().get_remote() == "gitlab_origin"
 
 
 @pytest.mark.unit
 def test_get_current_branch_in_ci_environment(monkeypatch) -> None:
     setup_runner_env(monkeypatch, "fakeurl", "fakecommit", "basebaserev", "beta")
-    assert GitlabBackend.current_branch() == "beta"
+    assert GitlabBackend().current_branch() == "beta"
 
 
 def _run_autotag_jobs(

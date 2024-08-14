@@ -112,7 +112,7 @@ class Config:
     branch_to_release_id: dict[str, ReleaseID] = field(default_factory=dict)
     verbose: bool = False
 
-    def start_branch(self) -> str:
+    def most_experimental_branch(self) -> str:
         """
         Return the most experimental branch.
 
@@ -121,11 +121,11 @@ class Config:
         return self.branches[0]
 
 
-def get_backend() -> type[Backend]:
-    if "CI" in os.environ:
-        return GitlabBackend
+def get_backend(url: str | None = None) -> Backend:
+    if "CI" in os.environ or (url and "gitlab" in url):
+        return GitlabBackend()
     else:
-        return TestGitlabBackend
+        return TestGitlabBackend()
 
 
 class Backend:
@@ -135,9 +135,8 @@ class Backend:
 
     supports_push_options: bool
 
-    @classmethod
     @abstractmethod
-    def current_branch(cls) -> str:
+    def current_branch(self) -> str:
         """
         Get the current git branch name.
 
@@ -148,14 +147,12 @@ class Backend:
             RuntimeError: If the current branch name is not obtainable
         """
 
-    @classmethod
     @abstractmethod
-    def get_base_rev(cls) -> str:
+    def get_base_rev(self) -> str:
         pass
 
-    @classmethod
     @abstractmethod
-    def get_remote(cls) -> str:
+    def get_remote(self) -> str:
         """
         Configure and retrieve the name of a Git remote for use in CI environments.
 
@@ -168,8 +165,7 @@ class Backend:
             The name of the configured remote
         """
 
-    @classmethod
-    def init_local_repo(cls, remote_name: str) -> None:
+    def init_local_repo(self, remote_name: str) -> None:
         """
         Setup the local repository.
 
@@ -177,13 +173,13 @@ class Backend:
             remote_name: name of the git remote, used to query the url
         """
         # initialize the local repo
-        git("fetch", "--all")
+        git("fetch", remote_name)
 
         if CONFIG.verbose:
             git("branch", "-la")
             git("remote", "-v")
 
-        if cls.supports_push_options:
+        if self.supports_push_options:
             push_opts = ["-o", "ci.skip"]
         else:
             push_opts = []
@@ -206,10 +202,9 @@ class Backend:
             else:
                 git("push", "--set-upstream", remote_name, branch, *push_opts)
 
-    @classmethod
     @abstractmethod
     def init_remote_repo(
-        cls, remote_url: str, access_token: str, save_token: bool
+        self, remote_url: str, access_token: str, save_token: bool
     ) -> None:
         """
         Setup the remote repository.
@@ -228,30 +223,45 @@ class GitlabBackend(Backend):
 
     supports_push_options = True
 
-    @classmethod
+    @cache
+    def _gitlab_project(self, base_url: str, access_token: str, project_and_ns: str):
+        try:
+            import gitlab
+        except ImportError:
+            raise click.ClickException(
+                f"To use the init command you must run: pip install {TOOL_NAME}[init]"
+            )
+
+        gl = gitlab.Gitlab(
+            url=base_url,
+            private_token=access_token,
+            retry_transient_errors=True,
+        )
+        try:
+            return gl.projects.get(project_and_ns)
+        except gitlab.exceptions.GitlabGetError:
+            raise click.ClickException(f"Could not find project '{project_and_ns}")
+
     def _find_promote_job(
-        cls, project: gitlab.v4.objects.Project
+        self, project: gitlab.v4.objects.Project
     ) -> gitlab.v4.objects.ProjectPipelineSchedule | None:
         schedules = project.pipelineschedules.list(get_all=True)
         for schedule in schedules:
-            if schedule.description == cls.PROMOTION_SCHEDULED_JOB_NAME:
+            if schedule.description == self.PROMOTION_SCHEDULED_JOB_NAME:
                 return schedule
         return None
 
-    @classmethod
-    def current_branch(cls) -> str:
+    def current_branch(self) -> str:
         try:
             return os.environ["CI_COMMIT_BRANCH"]
         except KeyError:
             raise RuntimeError
 
-    @classmethod
-    def get_base_rev(cls) -> str:
+    def get_base_rev(self) -> str:
         return os.environ["CI_COMMIT_BEFORE_SHA"]
 
-    @classmethod
     @cache
-    def _setup_remote(cls, url: str) -> None:
+    def _setup_remote(self, url: str) -> None:
         try:
             access_token = os.environ["ACCESS_TOKEN"]
         except KeyError:
@@ -264,23 +274,14 @@ class GitlabBackend(Backend):
         url = url.split("@")[-1]
         git("remote", "add", GITLAB_REMOTE, f"https://oauth2:{access_token}@{url}")
 
-    @classmethod
-    def get_remote(cls) -> str:
+    def get_remote(self) -> str:
         url = os.environ["CI_REPOSITORY_URL"]
-        cls._setup_remote(url)
+        self._setup_remote(url)
         return GITLAB_REMOTE
 
-    @classmethod
     def init_remote_repo(
-        cls, remote_url: str, access_token: str, save_token: bool
+        self, remote_url: str, access_token: str, save_token: bool
     ) -> None:
-        try:
-            import gitlab
-        except ImportError:
-            raise click.ClickException(
-                f"To use the init command you must run: pip install {TOOL_NAME}[init]"
-            )
-
         if remote_url.endswith(".git"):
             remote_url = remote_url[:-4]
 
@@ -291,54 +292,70 @@ class GitlabBackend(Backend):
         # remove leading "/"
         project_and_ns = url.path[1:]
 
-        gl = gitlab.Gitlab(
-            url=base_url,
-            private_token=access_token,
-            retry_transient_errors=True,
-        )
-        try:
-            project = gl.projects.get(project_and_ns)
-        except gitlab.exceptions.GitlabGetError:
-            raise click.ClickException(f"Could not find project '{project_and_ns}")
+        project = self._gitlab_project(base_url, access_token, project_and_ns)
 
         if save_token:
-            # FIXME: set to masked
-            project.variables.create({"key": "ACCESS_TOKEN", "value": access_token})
+            project.variables.create(
+                {
+                    "key": "ACCESS_TOKEN",
+                    "value": access_token,
+                    "protected": True,
+                    "masked": True,
+                }
+            )
             click.echo("Created ACCESS_TOKEN project variable")
         else:
             # FIXME: validate that ACCESS_TOKEN has been set at the project or group level
             pass
 
-        if not cls._find_promote_job(project):
+        import gitlab.const
+        import gitlab.exceptions
+
+        for branch in CONFIG.branches:
+            try:
+                p_branch = project.protectedbranches.get(branch)
+            except gitlab.exceptions.GitlabGetError:
+                project.protectedbranches.create(
+                    {
+                        "name": branch,
+                        "merge_access_level": gitlab.const.AccessLevel.DEVELOPER,
+                        "push_access_level": gitlab.const.AccessLevel.MAINTAINER,
+                        "allow_force_push": True,
+                    }
+                )
+            else:
+                p_branch.allow_force_push = True
+                p_branch.save()
+        click.echo("Setup protected branches")
+
+        if not self._find_promote_job(project):
             # this must happen after the branch has been created in the remote and initial commit pushed
             schedule = project.pipelineschedules.create(
                 {
-                    "ref": CONFIG.rc,
-                    "description": cls.PROMOTION_SCHEDULED_JOB_NAME,
+                    "ref": CONFIG.stable,
+                    "description": self.PROMOTION_SCHEDULED_JOB_NAME,
                     "cron": "6 6 * * 4",
                     "active": False,
                 }
             )
             schedule.variables.create({"key": "SCHEDULED_JOB_NAME", "value": "promote"})
             click.echo(
-                f"Created '{cls.PROMOTION_SCHEDULED_JOB_NAME}' scheduled job, in non-active state"
+                f"Created '{self.PROMOTION_SCHEDULED_JOB_NAME}' scheduled job, in non-active state"
             )
 
 
 class TestGitlabBackend(GitlabBackend):
     supports_push_options = False
 
-    @classmethod
-    def get_remote(cls) -> str:
+    def get_remote(self) -> str:
         """Override to do nothing"""
         return GITLAB_REMOTE
 
-    @classmethod
-    def init_remote_repo(
-        cls, remote_name: str, access_token: str, save_token: bool
-    ) -> None:
-        """Override to do nothing"""
-        pass
+    @cache
+    def _gitlab_project(self, base_url: str, access_token: str, project_and_ns: str):
+        import unittest.mock
+
+        return unittest.mock.MagicMock()
 
 
 def cz(*args: str, folder: str | Path | None = None) -> str:
@@ -618,7 +635,6 @@ def init(
     """
     import tempfile
 
-    backend = get_backend()
     if is_url(remote):
         init_local = False
         remote_url = remote
@@ -626,6 +642,8 @@ def init(
         # FIXME: print a user friendly error if we're not in a git repo.
         # FIXME: handle remote not setup correctly
         remote_url = git("remote", "get-url", remote, capture=True)
+
+    backend = get_backend(remote_url)
 
     # FIXME: add pyproject.toml section?  check if it exists?  Hard to do automatically,
     #  because in a monorepo there could be many.
@@ -638,7 +656,7 @@ def init(
     else:
         # we may still need to create branches in the remote, so create a dummy clone
         with tempfile.TemporaryDirectory() as tmpdir:
-            git("clone", f"--branch={CONFIG.stable}", "--depth=0", remote_url, tmpdir)
+            git("clone", f"--branch={CONFIG.stable}", remote_url, tmpdir)
             pwd = os.getcwd()
             try:
                 os.chdir(tmpdir)
@@ -812,21 +830,18 @@ def promote() -> None:
 
     # loop from stable to most experimental
     for branch in reversed(CONFIG.branches):
-        # It doesn't matter what the active branch is when promote is run: the next thing that we do
-        # is check out CONFIG.stable.
-        if branch == CONFIG.start_branch():
+        # It doesn't matter what the active branch is when promote is run: the next thing
+        # that we do is checkout CONFIG.stable.
+        if branch == CONFIG.most_experimental_branch():
             msg = PROMOTION_CYCLE_START_MESSAGE
         else:
             msg = PROMOTION_MESSAGE
 
-        promote_branch(
-            branch,
-            msg,
-        )
+        promote_branch(branch, msg)
 
     # Note: we do not make a beta tag at this time. Instead, we wait for the first commit on the
     # CONFIG.beta branch to do so.
-    set_promotion_marker(remote, CONFIG.start_branch())
+    set_promotion_marker(remote, CONFIG.most_experimental_branch())
 
 
 @cli.command(name="projects")
