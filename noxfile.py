@@ -20,13 +20,12 @@ def lint(session: nox.Session) -> None:
     """
     Lint the project's codebase.
 
-    This session installs necessary dependencies for linting and then runs pre-commit
-    for all the files. This is intended for manual usage ie:
+    This installs and then runs pre-commit for all files. This is intended for manual usage ie:
 
     nox -s lint
 
     Args:
-        session (nox.Session): The Nox session being run, providing context and methods for session actions.
+        session: The Nox session context.
     """
     session.install("pre-commit==3.6.2")
     session.run(
@@ -43,11 +42,8 @@ def ruff_lint(session: nox.Session) -> None:
     """
     Lint the project's codebase.
 
-    This session installs necessary dependencies for linting and then runs the linter to check for
-    stylistic errors and coding standards compliance across the project's codebase.
-
     Args:
-        session (nox.Session): The Nox session being run, providing context and methods for session actions.
+        session: The Nox session context.
     """
     session.install("ruff==0.5.4")
     session.run("ruff", "check", "--fix", *session.posargs)
@@ -62,7 +58,7 @@ def ruff_format(session: nox.Session) -> None:
     to check (and optionally correct) the code format according to the project's style guide.
 
     Args:
-        session (nox.Session): The Nox session being run, providing context and methods for session actions.
+        session: The Nox session context.
     """
     session.install("ruff==0.5.4")
     session.run("ruff", "format", *session.posargs)
@@ -95,7 +91,7 @@ def type_hints(session: nox.Session) -> None:
     to validate the type hints throughout the project's codebase, ensuring they are correct and consistent.
 
     Args:
-        session (nox.Session): The Nox session being run, providing context and methods for session actions.
+        session: The Nox session context.
     """
     session.install("mypy==1.9.0")
     session.run("mypy", *session.posargs)
@@ -110,7 +106,7 @@ def unit_tests(session: nox.Session) -> None:
     It is focused on testing the functionality of individual units of code in isolation.
 
     Args:
-        session (nox.Session): The Nox session being run, providing context and methods for session actions.
+        session: The Nox session context.
     """
     session.install("pytest==8.1.1")
     # [init] extra (i.e. gitlab) is not installed by default because it's a heavy dep
@@ -131,11 +127,8 @@ def smoke_tests(session: nox.Session) -> None:
     """
     Run the project's smoke tests.
 
-    This session installs the necessary dependencies and runs a subset of tests designed to quickly
-    check the most important functions of the program, often as a prelude to more thorough testing.
-
     Args:
-        session (nox.Session): The Nox session being run, providing context and methods for session actions.
+        session: The Nox session context.
     """
     session.install("pytest==8.1.1")
     session.install("-e", ".[init]")
@@ -159,8 +152,7 @@ def docs(session: nox.Session) -> None:
     It can also serve the site locally for development purposes.
 
     Args:
-        session (nox.Session): The Nox session object, used to execute shell commands
-            and manage the session environment.
+        session: The Nox session context.
 
     Command-line Arguments:
         --serve: If provided, the documentation will be served after building,
@@ -235,13 +227,11 @@ def monoflow(session: nox.Session, *args: str) -> None:
 @nox.session(tags=["ci"], reuse_venv=True)
 def autotag(session: nox.Session) -> None:
     """
-    Automatically tag the current branch with a new version number and push the tag to the remote repository.
+    Automatically tag the current branch with a new version number and push the tag to
+    the remote repository.
 
     Args:
-        session (nox.Session): The Nox session context.
-
-    This session uses command-line arguments to define the annotation for the tag and uses the Commitizen tool
-    to determine the next tag based on conventional commits. It then tags the branch and pushes the tag to the remote.
+        session: The Nox session context.
     """
     monoflow(session, "autotag")
 
@@ -252,11 +242,7 @@ def hotfix(session: nox.Session) -> None:
     Handle automatic hotfix merging from a feature branch back to its upstream branch.
 
     Args:
-        session (nox.Session): The Nox session context.
-
-    This session checks if there is an upstream branch and performs an automatic merge from the
-    current branch. If conflicts arise, the session logs the conflicts and fails. If successful,
-    it pushes the changes to the remote.
+        session: The Nox session context.
     """
     monoflow(session, "hotfix")
 
@@ -264,13 +250,9 @@ def hotfix(session: nox.Session) -> None:
 @nox.session(tags=["ci"], reuse_venv=True)
 def promote(session: nox.Session) -> None:
     """
-    Promote changes through the branch hierarchy from beta to RC to stable.
+    Promote changes through the branch hierarchy from pre-release branches to the stable branch.
 
     Args:
-        session (nox.Session): The Nox session context.
-
-    This session promotes changes upstream through defined branches, handling merge operations
-    and triggering deployment/testing pipelines with new versions. Each branch promotion checks
-    for the presence of the branch, merges, and pushes changes.
+        session: The Nox session context.
     """
     monoflow(session, "promote")
