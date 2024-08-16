@@ -5,12 +5,6 @@ default:
 # only cache local items.
 variables:
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
-  # FIXME: these don't work in rules the way that we want them to.
-  MONOFLOW_STABLE_BRANCH: "master"
-  MONOFLOW_RC_BRANCH: "staging"
-  MONOFLOW_BETA_BRANCH: "develop"
-  # MONOFLOW_BRANCHES: "(^$MONOFLOW_STABLE_BRANCH$|^$MONOFLOW_RC_BRANCH$|^$MONOFLOW_BETA_BRANCH$)"
-  MONOFLOW_AUTOTAG_ANNOTATION: $CI_COMMIT_TITLE
 
 # https://pip.pypa.io/en/stable/topics/caching/
 cache:
@@ -19,25 +13,88 @@ cache:
 
 before_script:
   - |
-    git config --global user.email "fake@email.com"
-    git config --global user.name "ci-bot"
     python --version ; pip --version  # For debugging
     pip install -r requirements.txt
-    env
     git log --graph --abbrev-commit --oneline --all --decorate
 
 stages:
   - build
   - test
-  - auto-tag
-  - promote
+  - monoflow
+
+# --- standard monoflow configuration below here ---
 
 .common_rules:
+  # provided for convenience: not used by monoflow
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_TAG
       when: never
     - if: '$CI_COMMIT_BRANCH =~ "^(master|staging|develop)$"'
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+.monoflow-base:
+  stage: monoflow
+  before_script:
+    - pip install -e .
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_TAG
+      when: never
+    - if: $CI_COMMIT_BRANCH == $TARGET_BRANCH && $MONOFLOW_SKIP_HOTFIX != "true"
+
+.auto-tag-base:
+  extends: .monoflow-base
+  script:
+   - echo "Deploying $TARGET_BRANCH!"
+   - monoflow autotag --annotation "$MONOFLOW_AUTOTAG_ANNOTATION"
+  # releases must be performed serially, in order.
+  resource_group: "$TARGET_BRANCH"
+  variables:
+    MONOFLOW_AUTOTAG_ANNOTATION: $CI_COMMIT_TITLE
+
+auto-tag-develop:
+  extends: .auto-tag-base
+  variables:
+    TARGET_BRANCH: develop
+
+auto-tag-staging:
+  extends: .auto-tag-base
+  variables:
+    TARGET_BRANCH: staging
+
+auto-tag-master:
+  extends: .auto-tag-base
+  variables:
+    TARGET_BRANCH: master
+
+.hotfix-base:
+  extends: .monoflow-base
+  # always runs last
+  stage: .post
+  # it's ok if hotfix does not succeed
+  allow_failure: true
+  script:
+   - monoflow hotfix
+
+hotfix-master-to-staging:
+  extends: .hotfix-base
+  variables:
+    TARGET_BRANCH: master
+
+hotfix-staging-to-develop:
+  extends: .hotfix-base
+  variables:
+    TARGET_BRANCH: staging
+
+promote:
+  extends: .monoflow-base
+  resource_group: promote
+  script:
+   - monoflow promote
+  # overrides .monoflow-base
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $SCHEDULED_JOB_NAME == "promote"
+
+# --- end standard monoflow configuration  --
 
 # debug:
 #   stage: build
@@ -62,60 +119,3 @@ smoke-tests:
   stage: test
   script: echo "Testing!"
 #   script: nox -s smoke_tests
-
-.auto-tag-base:
-  stage: auto-tag
-  script:
-   - echo "Deploying $TARGET_BRANCH!"
-   - nox -s autotag -v --force-color -- --annotation "$MONOFLOW_AUTOTAG_ANNOTATION"
-  # releases must be performed serially, in order.
-  resource_group: "$TARGET_BRANCH"
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_TAG
-      when: never
-    - if: $CI_COMMIT_BRANCH == $TARGET_BRANCH
-
-auto-tag-develop:
-  extends: .auto-tag-base
-  variables:
-    TARGET_BRANCH: develop
-
-auto-tag-staging:
-  extends: .auto-tag-base
-  variables:
-    TARGET_BRANCH: staging
-
-auto-tag-master:
-  extends: .auto-tag-base
-  variables:
-    TARGET_BRANCH: master
-
-.hotfix-base:
-  # always runs last
-  stage: .post
-  # it's ok if auto-hotfix does not succeed
-  allow_failure: true
-  script:
-   - nox -s hotfix --force-color
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_TAG
-      when: never
-    - if: $CI_COMMIT_BRANCH == $TARGET_BRANCH && $MONOFLOW_SKIP_HOTFIX != "true"
-
-hotfix-master-to-staging:
-  extends: .hotfix-base
-  variables:
-    TARGET_BRANCH: master
-
-hotfix-staging-to-develop:
-  extends: .hotfix-base
-  variables:
-    TARGET_BRANCH: staging
-
-promote:
-  stage: promote
-  resource_group: promote
-  script:
-   - nox -s promote --force-color
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "schedule" && $SCHEDULED_JOB_NAME == "promote"

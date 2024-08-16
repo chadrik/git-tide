@@ -333,7 +333,7 @@ major_version_zero = false
         remote_data.tempdir.cleanup()
 
 
-def create_file_and_commit(
+def commit_file_and_push(
     branch, message: str, folder: str | None = None, filename: str | None = None
 ) -> None:
     """
@@ -586,15 +586,15 @@ def run_autotag(
             wait_for_job(remote_data.project, job)
         print("autotag job done")
         return job
-
-    time.sleep(DELAY)
-    args = [
-        "autotag",
-        f"--annotation={annotation}",
-    ]
-    if base_rev:
-        args.extend(["--base-rev", base_rev])
-    _monoflow(*args)
+    else:
+        time.sleep(DELAY)
+        args = [
+            "autotag",
+            f"--annotation={annotation}",
+        ]
+        if base_rev:
+            args.extend(["--base-rev", base_rev])
+        _monoflow(*args)
 
 
 def run_promote(
@@ -1082,14 +1082,27 @@ def test_get_current_branch_in_ci_environment(monkeypatch) -> None:
     assert GitlabBackend().current_branch() == "beta"
 
 
-def _run_autotag_jobs(
-    tmp_path_factory, tag_args: list[dict], remote_data, monkeypatch
+def run_promote_and_autotag_jobs(
+    config, tmp_path_factory, expected_tag_args: list[dict], remote_data, monkeypatch
 ) -> None:
     """
     Execute one or more autotag pipelines.
 
     Autotag jobs may run in parallel on multiple pipelines.
     """
+    # Promote (promote always runs on rc, according to our .gitlab-ci.yml)
+    with pipeline(
+        tmp_path_factory,
+        config.rc,
+        "Promote",
+        remote_data,
+        monkeypatch,
+    ):
+        tag_args = run_promote(config.beta, remote_data, monkeypatch)
+
+    if tag_args is None:
+        tag_args = expected_tag_args
+
     pprint.pprint(tag_args)
     jobs = []
     for tag_arg in tag_args:
@@ -1145,9 +1158,10 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     print_git_graph()
     print()
 
+    # -- commit and autotag
     # (ProjectA) Add feature 1 to BETA branch
     msg = f"{config.beta}: (projectA) add feature 1"
-    create_file_and_commit(config.beta, msg, folder="projectA")
+    commit_file_and_push(config.beta, msg, folder="projectA")
     with pipeline(
         tmp_path_factory,
         config.beta,
@@ -1160,27 +1174,18 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
 
     assert latest_tag("projectA-*") == "projectA-1.1.0b0"
 
-    # Promote (promote always runs on rc, according to our .gitlab-ci.yml)
-    with pipeline(
-        tmp_path_factory,
-        config.rc,
-        "Promote",
-        remote_data,
-        monkeypatch,
-    ):
-        # this pipeline runs manually or on a schedule
-        tag_args = run_promote(config.beta, remote_data, monkeypatch)
+    # -- promote
+    tag_args = [
+        {
+            "annotation": "promoting develop to staging!",
+            "base_rev": None,
+            "branch": "staging",
+        }
+    ]
 
-    if tag_args is None:
-        tag_args = [
-            {
-                "annotation": "promoting develop to staging!",
-                "base_rev": None,
-                "branch": "staging",
-            }
-        ]
-
-    _run_autotag_jobs(tmp_path_factory, tag_args, remote_data, monkeypatch)
+    run_promote_and_autotag_jobs(
+        config, tmp_path_factory, tag_args, remote_data, monkeypatch
+    )
 
     expected = rf"""
     * {config.beta}: (projectA) add feature 1 -  (HEAD -> {config.rc}, tag: projectA-1.1.0rc0, tag: projectA-1.1.0b0, origin/{config.rc}, origin/{config.beta}, {config.beta})
@@ -1189,9 +1194,10 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
 
     assert latest_tag("projectA-*") == "projectA-1.1.0rc0"
 
+    # -- commit and autotag
     # (ProjectA) Add beta feature 2 to BETA branch
     msg = f"{config.beta}: (projectA) add beta feature 2"
-    create_file_and_commit(config.beta, msg, folder="projectA")
+    commit_file_and_push(config.beta, msg, folder="projectA")
     with pipeline(
         tmp_path_factory,
         config.beta,
@@ -1210,9 +1216,10 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
 
     assert latest_tag("projectA-*") == "projectA-1.2.0b0"
 
+    # -- commit, autotag, and hotfix
     # (ProjectA) Add hotfix to STABLE branch
     msg = f"{config.stable}: (projectA) add hotfix"
-    create_file_and_commit(config.stable, msg, folder="projectA")
+    commit_file_and_push(config.stable, msg, folder="projectA")
     with pipeline(
         tmp_path_factory,
         config.stable,
@@ -1255,9 +1262,11 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
 
     assert latest_tag("projectA-*") == "projectA-1.2.0b1"
 
+    # -- commit and autotag
+
     # (ProjectB) Add feature 1 to BETA branch
     msg = f"{config.beta}: (projectB) add feature 1"
-    create_file_and_commit(config.beta, msg, folder="projectB")
+    commit_file_and_push(config.beta, msg, folder="projectB")
     with pipeline(
         tmp_path_factory,
         config.beta,
@@ -1270,9 +1279,11 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
 
     assert latest_tag("projectB-*") == "projectB-1.1.0b0"
 
+    # -- commit, autotag, and hotfix
+
     # (ProjectA) Add hotfix 2 to RC branch
     msg = f"{config.rc}: (projectA) add hotfix 2"
-    create_file_and_commit(config.rc, msg, folder="projectA")
+    commit_file_and_push(config.rc, msg, folder="projectA")
     with pipeline(
         tmp_path_factory,
         config.rc,
@@ -1320,31 +1331,23 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     # there are no changes for projectB, so the tag should remain the same
     assert latest_tag("projectB-*") == "projectB-1.1.0b0"
 
-    # Promote (promote always runs on rc, according to our .gitlab-ci.yml)
-    with pipeline(
-        tmp_path_factory,
-        config.rc,
-        "Promote",
-        remote_data,
-        monkeypatch,
-    ):
-        tag_args = run_promote(config.beta, remote_data, monkeypatch)
+    # -- promote
 
-    if tag_args is None:
-        tag_args = [
-            {
-                "annotation": "promoting staging to master!",
-                "base_rev": None,
-                "branch": config.stable,
-            },
-            {
-                "annotation": "promoting develop to staging!",
-                "base_rev": None,
-                "branch": config.rc,
-            },
-        ]
-
-    _run_autotag_jobs(tmp_path_factory, tag_args, remote_data, monkeypatch)
+    tag_args = [
+        {
+            "annotation": "promoting staging to master!",
+            "base_rev": None,
+            "branch": config.stable,
+        },
+        {
+            "annotation": "promoting develop to staging!",
+            "base_rev": None,
+            "branch": config.rc,
+        },
+    ]
+    run_promote_and_autotag_jobs(
+        config, tmp_path_factory, tag_args, remote_data, monkeypatch
+    )
 
     expected = rf"""
     *   auto-hotfix into {config.beta}: {config.rc}: (projectA) add hotfix 2 -  (HEAD -> {config.rc}, tag: projectB-1.1.0rc0, tag: projectA-1.2.0rc0, tag: projectA-1.2.0b2, origin/{config.rc}, origin/{config.beta}, {config.beta})
@@ -1363,26 +1366,19 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     * initial state -  (tag: projectB-1.0.0, tag: projectA-1.0.0)"""
     verify_git_graph(expected)
 
-    # Promote (promote always runs on rc, according to our .gitlab-ci.yml)
-    with pipeline(
-        tmp_path_factory,
-        config.rc,
-        "Promote",
-        remote_data,
-        monkeypatch,
-    ):
-        tag_args = run_promote(config.beta, remote_data, monkeypatch)
+    # -- promote
 
-    if tag_args is None:
-        tag_args = [
-            {
-                "annotation": "promoting staging to master!",
-                "base_rev": None,
-                "branch": config.stable,
-            }
-        ]
+    tag_args = [
+        {
+            "annotation": "promoting staging to master!",
+            "base_rev": None,
+            "branch": config.stable,
+        }
+    ]
 
-    _run_autotag_jobs(tmp_path_factory, tag_args, remote_data, monkeypatch)
+    run_promote_and_autotag_jobs(
+        config, tmp_path_factory, tag_args, remote_data, monkeypatch
+    )
 
     expected = rf"""
     *   auto-hotfix into {config.beta}: {config.rc}: (projectA) add hotfix 2 -  (HEAD -> {config.stable}, tag: projectB-1.1.0rc0, tag: projectB-1.1.0, tag: projectA-1.2.0rc0, tag: projectA-1.2.0b2, tag: projectA-1.2.0, origin/{config.rc}, origin/{config.stable}, origin/{config.beta}, {config.rc}, {config.beta})
@@ -1399,6 +1395,17 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     * / {config.beta}: (projectA) add feature 1 -  (tag: projectA-1.1.0rc0, tag: projectA-1.1.0b0)
     |/  
     * initial state -  (tag: projectB-1.0.0, tag: projectA-1.0.0)"""
+    verify_git_graph(expected)
+
+    # -- promote
+
+    tag_args = []
+    # no new tags are created when we run promote and there are no changes on RC or BETA
+    run_promote_and_autotag_jobs(
+        config, tmp_path_factory, tag_args, remote_data, monkeypatch
+    )
+    git("checkout", config.stable)
+    # verify against the previous "expected" state
     verify_git_graph(expected)
 
     if VERBOSE:

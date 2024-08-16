@@ -419,11 +419,10 @@ def is_pending_bump(remote: str, branch: str, folder: Path) -> bool:
     from commitizen.config import read_cfg
     from commitizen.providers import ScmProvider
 
-    # FIXME: support alpha and rc?
-    if branch != CONFIG.beta:
+    if branch != CONFIG.most_experimental_branch():
         return False
 
-    # Find the closest promotion note to the current beta branch
+    # Find the closest promotion note to the current branch
     promotion_rev = get_promotion_marker(remote)
     if promotion_rev is None:
         click.echo("No promote marker found")
@@ -438,7 +437,7 @@ def is_pending_bump(remote: str, branch: str, folder: Path) -> bool:
         matcher = provider._tag_format_matcher()
         if CONFIG.verbose:
             click.echo(f"Found promotion base rev: {promotion_rev}")
-        # List any tags for this project folder between beta branch and the promotion note
+        # List any tags for this project folder between this branch and the promotion note
         all_tags = get_tags(end_rev=promotion_rev)
         tags = [t for t in all_tags if matcher(t)]
         return not tags
@@ -508,7 +507,7 @@ def get_tag_for_branch(remote: str, branch: str, folder: Path) -> str:
 
     increment = "patch"
 
-    # Only apply minor increment beta
+    # Only apply minor increment the most experimental branch
     if is_pending_bump(remote, branch, folder):
         increment = "minor"
 
@@ -773,7 +772,7 @@ def hotfix() -> None:
 @cli.command()
 def promote() -> None:
     """
-    Promote changes through the branch hierarchy from beta to rc to stable.
+    Promote changes through the branch hierarchy from alpha -> beta -> rc -> stable.
     """
     backend = get_backend()
     remote = backend.get_remote()
@@ -849,8 +848,8 @@ def promote() -> None:
 
         promote_branch(branch, msg)
 
-    # Note: we do not make a beta tag at this time. Instead, we wait for the first commit on the
-    # CONFIG.beta branch to do so.
+    # Note: we do not make a tag on our cycle-start branch at this time. Instead, we wait
+    # for the first commit on the branch to do so.
     set_promotion_marker(remote, CONFIG.most_experimental_branch())
 
 
