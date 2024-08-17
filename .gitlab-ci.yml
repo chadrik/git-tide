@@ -36,35 +36,20 @@ stages:
   stage: monoflow
   before_script:
     - pip install -e .
+
+auto-tag:
+  extends: .monoflow-base
+  script:
+   - echo "Deploying $CI_COMMIT_BRANCH!"
+   - monoflow autotag --annotation "$MONOFLOW_AUTOTAG_ANNOTATION"
+  # must be performed serially, in order.
+  resource_group: $CI_COMMIT_BRANCH
+  variables:
+    MONOFLOW_AUTOTAG_ANNOTATION: $CI_COMMIT_TITLE
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_TAG
       when: never
-    - if: $CI_COMMIT_BRANCH == $TARGET_BRANCH && $MONOFLOW_SKIP_HOTFIX != "true"
-
-.auto-tag-base:
-  extends: .monoflow-base
-  script:
-   - echo "Deploying $TARGET_BRANCH!"
-   - monoflow autotag --annotation "$MONOFLOW_AUTOTAG_ANNOTATION"
-  # releases must be performed serially, in order.
-  resource_group: "$TARGET_BRANCH"
-  variables:
-    MONOFLOW_AUTOTAG_ANNOTATION: $CI_COMMIT_TITLE
-
-auto-tag-develop:
-  extends: .auto-tag-base
-  variables:
-    TARGET_BRANCH: develop
-
-auto-tag-staging:
-  extends: .auto-tag-base
-  variables:
-    TARGET_BRANCH: staging
-
-auto-tag-master:
-  extends: .auto-tag-base
-  variables:
-    TARGET_BRANCH: master
+    - if: '$CI_COMMIT_BRANCH =~ "^(master|staging|develop)$"'
 
 .hotfix-base:
   extends: .monoflow-base
@@ -74,6 +59,12 @@ auto-tag-master:
   allow_failure: true
   script:
    - monoflow hotfix
+  # must be performed serially, in order.
+  resource_group: $CI_COMMIT_BRANCH
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_TAG
+      when: never
+    - if: $CI_COMMIT_BRANCH == $TARGET_BRANCH && $MONOFLOW_SKIP_HOTFIX != "true"
 
 hotfix-master-to-staging:
   extends: .hotfix-base
@@ -90,7 +81,6 @@ promote:
   resource_group: promote
   script:
    - monoflow promote
-  # overrides .monoflow-base
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule" && $SCHEDULED_JOB_NAME == "promote"
 
