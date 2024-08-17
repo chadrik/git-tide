@@ -823,3 +823,12 @@ def projects(modified: bool) -> None:
 
     for project in projects_:
         click.echo(str(project))
+
+
+def main():
+    import shutil
+
+    return cli(
+        auto_envvar_prefix=ENVVAR_PREFIX,
+        max_content_width=shutil.get_terminal_size().columns,
+    )

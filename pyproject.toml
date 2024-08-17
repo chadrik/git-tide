@@ -17,7 +17,7 @@ python-gitlab = { version = "4.8.0", optional = true }
 init = ["python-gitlab"]
 
 [tool.poetry.scripts]
-monoflow = "monoflow:cli"
+monoflow = "monoflow.core:main"
 
 [build-system]
 requires = ["poetry-core"]
