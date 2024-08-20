@@ -741,12 +741,6 @@ def init(
 
     backend = get_backend(remote_url)
 
-    # FIXME: add pyproject.toml section?  check if it exists?  Hard to do automatically,
-    #  because in a monorepo there could be many.
-    # FIXME: create a stub gitlab-ci.yml file if it doesn't exist?
-    if init_remote:
-        backend.init_remote_repo(remote_url, access_token, save_token)
-
     if init_local:
         backend.init_local_repo(remote)
     else:
@@ -759,6 +753,12 @@ def init(
                 backend.init_local_repo("origin")
             finally:
                 os.chdir(pwd)
+
+    # FIXME: add pyproject.toml section?  check if it exists?  Hard to do automatically,
+    #  because in a monorepo there could be many.
+    # FIXME: create a stub gitlab-ci.yml file if it doesn't exist?
+    if init_remote:
+        backend.init_remote_repo(remote_url, access_token, save_token)
 
 
 @cli.command()
