@@ -115,13 +115,16 @@ class Config:
     branch_to_release_id: dict[str, ReleaseID] = field(default_factory=dict)
     verbose: bool = False
 
-    def most_experimental_branch(self) -> str:
+    def most_experimental_branch(self) -> str | None:
         """
         Return the most experimental branch.
 
         This branch corresponds to the earliest pre-release specified by the config.
         """
-        return self.branches[0]
+        if self.branches[0] == self.stable:
+            return None
+        else:
+            return self.branches[0]
 
 
 def get_backend(url: str | None = None) -> Backend:
@@ -877,7 +880,9 @@ def promote() -> None:
 
     # Note: we do not make a tag on our cycle-start branch at this time. Instead, we wait
     # for the first commit on the branch to do so.
-    set_promotion_marker(remote, CONFIG.most_experimental_branch())
+    experimental_branch = CONFIG.most_experimental_branch()
+    if experimental_branch:
+        set_promotion_marker(remote, experimental_branch)
 
 
 @cli.command(name="projects")

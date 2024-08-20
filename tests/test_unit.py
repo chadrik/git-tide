@@ -195,14 +195,13 @@ class LocalData:
 
 @pytest.fixture
 def setup_git_repo(
-    tmpdir, gitlab_project, monkeypatch
+    tmpdir, gitlab_project, request
 ) -> Generator[tuple[str, Config], None, None]:
     """
     Pytest fixture that sets up a temporary Git repository with an initial commit of project files.
 
     Args:
         tmpdir: Temporary directory provided by pytest.
-        monkeypatch: Pytest's monkeypatch fixture to update environment variables.
 
     Yields:
         The path of the temporary directory with initialized Git repository.
@@ -210,6 +209,11 @@ def setup_git_repo(
     This setup includes copying essential project files, creating an initial commit, and simulating
     an autotag process. It cleans up by removing the .git directory after tests are done.
     """
+    if "branches" in request.keywords:
+        branches = request.keywords["branches"].args[0]
+    else:
+        branches = {"beta": "develop", "rc": "staging", "stable": "master"}
+
     tmp_path = Path(str(tmpdir))
     print(f"Git repo: {tmp_path}")
     os.chdir(tmp_path)
@@ -218,9 +222,7 @@ def setup_git_repo(
         os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     )
     files_to_copy = [
-        "noxfile.py",
         ".gitignore",
-        "pyproject.toml",
         ".gitlab-ci.yml",
         "requirements.txt",
         "src",
@@ -237,6 +239,20 @@ def setup_git_repo(
         else:
             raise TypeError(src)
 
+    lines = (
+        parent_directory.joinpath("pyproject.toml")
+        .read_text()
+        .splitlines(keepends=False)
+    )
+    index = lines.index("[tool.tide]")
+    pyproject = tmp_path.joinpath("pyproject.toml")
+    lines = lines[: index + 1]
+    for release_id, branch in branches.items():
+        lines.append(f'branches.{release_id} = "{branch}"')
+    new_text = "\n".join(lines)
+    print(new_text)
+    pyproject.write_text(new_text)
+
     for project in PROJECTS:
         dest = tmp_path.joinpath(project)
         dest.mkdir(parents=True, exist_ok=True)
@@ -252,9 +268,7 @@ version_provider = "scm"
 major_version_zero = false
 """)
 
-    config = set_config(
-        load_config(str(tmp_path.joinpath("pyproject.toml")), verbose=VERBOSE)
-    )
+    config = set_config(load_config(str(pyproject), verbose=VERBOSE))
 
     # Initialize the git repository
     git("init", "-b", config.stable)
@@ -336,7 +350,7 @@ major_version_zero = false
 
 
 def commit_file_and_push(
-    branch, message: str, folder: str | None = None, filename: str | None = None
+    branch: str, message: str, folder: str | None = None, filename: str | None = None
 ) -> None:
     """
     Create a file and commit it to the repository.
@@ -1133,7 +1147,7 @@ def run_promote_and_autotag_jobs(
     # Promote (promote always runs on rc, according to our .gitlab-ci.yml)
     with pipeline(
         tmp_path_factory,
-        config.rc,
+        config.rc or config.stable,
         "Promote",
         remote_data,
         monkeypatch,
@@ -1479,3 +1493,58 @@ projectA-1.0.0           initial state"""
     assert set(get_tags_with_annotations()) == set(
         textwrap.dedent(expected_tags).strip().splitlines()
     )
+
+
+@pytest.mark.unit
+@pytest.mark.branches({"stable": "main"})
+def test_dev_cycle_one_branch(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
+    """
+    Test the development cycle by mimicking typical operations in a CICD environment.
+    """
+    local_repo, config, remote_data = setup_git_repo
+    assert os.path.isdir(local_repo)
+    assert latest_tag("projectA-*") == "projectA-1.0.0"
+
+    print_git_graph()
+    print()
+
+    # -- commit and autotag
+    # (ProjectA) Add feature 1 to STABLE branch
+    msg = f"{config.stable}: (projectA) add feature 1"
+    commit_file_and_push(config.stable, msg, folder="projectA")
+    with pipeline(
+        tmp_path_factory,
+        config.stable,
+        "(ProjectA) Add feature 1 to STABLE branch",
+        remote_data,
+        monkeypatch,
+    ) as env:
+        # this pipeline runs in response to a merged merge request
+        run_autotag(env, remote_data)
+
+    assert latest_tag("projectA-*") == "projectA-1.0.1"
+
+    # -- commit and autotag
+    # (ProjectA) Add feature 2 to STABLE branch
+    msg = f"{config.stable}: (projectB) add feature 1"
+    commit_file_and_push(config.stable, msg, folder="projectB")
+    with pipeline(
+        tmp_path_factory,
+        config.stable,
+        "(projectB) Add feature 1 to STABLE branch",
+        remote_data,
+        monkeypatch,
+    ) as env:
+        # this pipeline runs in response to a merged merge request
+        run_autotag(env, remote_data)
+
+    assert latest_tag("projectB-*") == "projectB-1.0.1"
+
+    # -- promote
+    tag_args = []
+
+    run_promote_and_autotag_jobs(
+        config, tmp_path_factory, tag_args, remote_data, monkeypatch
+    )
+
+    assert latest_tag("projectA-*") == "projectA-1.0.1"
