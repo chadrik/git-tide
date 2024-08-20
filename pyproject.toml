@@ -40,3 +40,10 @@ markers = [
 branches.beta = "develop"
 branches.rc = "staging"
 branches.stable = "master"
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+tag_format = "$version"
+version_scheme = "pep440"
+version_provider = "scm"
+major_version_zero = false

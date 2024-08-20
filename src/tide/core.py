@@ -32,6 +32,7 @@ PROMOTION_BASE_MSG = "promotion base"
 HERE = os.path.dirname(__file__)
 CONFIG: Config
 GITLAB_REMOTE = "gitlab_origin"
+CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
 # FIXME: add these to config file
 HOTFIX_MESSAGE = "auto-hotfix into {upstream_branch}: {message}"
@@ -128,18 +129,34 @@ class Config:
 
 
 def get_backend(url: str | None = None) -> Backend:
+    """
+    Return a Backend corresponding to where the current python process is pushing/pulling.
+    """
     if os.environ.get("GITLAB_CI", "false") == "true" or (url and "gitlab" in url):
         return GitlabBackend()
     else:
         return TestGitlabBackend()
 
 
-class Backend:
+def get_runtime() -> Runtime:
     """
-    Interact with a git backend / CI backend
+    Return a Runtime corresponding to where the current python process is *running*
     """
+    print(os.environ.get("GITLAB_CI"))
+    if os.environ.get("GITLAB_CI", "false") == "true":
+        return GitlabRuntime()
+    # gitlab-ci-local and our unittests set this to false as an inidicator that
+    # we are testing gitlab, but not IN gitlab.
+    elif os.environ.get("GITLAB_CI") == "false":
+        return TestGitlabRuntime()
+    else:
+        return LocalRuntime()
 
-    supports_push_options: bool
+
+class Runtime:
+    """
+    Interact with a git repo that is local to the current process
+    """
 
     @abstractmethod
     def current_branch(self) -> str:
@@ -177,11 +194,29 @@ class Backend:
             The name of the configured remote
         """
 
-    @abstractmethod
+
+class Backend:
+    """
+    Interact with a remote git backend.
+    """
+
+    supports_push_options: bool
+
     def push(
         self, *args: str, variables: dict[str, str] | None = None, skip_ci: bool = False
-    ):
-        pass
+    ) -> None:
+        opts = []
+        if skip_ci:
+            opts.extend(["-o", "ci.skip"])
+        if variables:
+            for key, value in variables.items():
+                opts.extend(
+                    [
+                        "-o",
+                        f"ci.variable={key}={value}",
+                    ]
+                )
+        git("push", *args, *opts)
 
     def init_local_repo(self, remote_name: str) -> None:
         """
@@ -229,6 +264,36 @@ class Backend:
         """
 
 
+class GitlabRuntime(Runtime):
+    def current_branch(self) -> str:
+        try:
+            return os.environ["CI_COMMIT_BRANCH"]
+        except KeyError:
+            raise RuntimeError
+
+    def get_base_rev(self) -> str:
+        return os.environ["CI_COMMIT_BEFORE_SHA"]
+
+    @cache
+    def _setup_remote(self, url: str) -> None:
+        try:
+            access_token = os.environ["ACCESS_TOKEN"]
+        except KeyError:
+            raise click.ClickException(
+                "You must setup a CI variable in the Gitlab process called ACCESS_TOKEN\n"
+                "See https://docs.gitlab.com/ee/ci/variables/#for-a-project"
+            )
+        git("config", "user.email", os.environ["GITLAB_USER_EMAIL"])
+        git("config", "user.name", os.environ["GITLAB_USER_NAME"])
+        url = url.split("@")[-1]
+        git("remote", "add", GITLAB_REMOTE, f"https://oauth2:{access_token}@{url}")
+
+    def get_remote(self) -> str:
+        url = os.environ["CI_REPOSITORY_URL"]
+        self._setup_remote(url)
+        return GITLAB_REMOTE
+
+
 class GitlabBackend(Backend):
     """Gitlab-specific behavior"""
 
@@ -265,50 +330,6 @@ class GitlabBackend(Backend):
             if schedule.description == self.PROMOTION_SCHEDULED_JOB_NAME:
                 return schedule
         return None
-
-    def current_branch(self) -> str:
-        try:
-            return os.environ["CI_COMMIT_BRANCH"]
-        except KeyError:
-            raise RuntimeError
-
-    def get_base_rev(self) -> str:
-        return os.environ["CI_COMMIT_BEFORE_SHA"]
-
-    @cache
-    def _setup_remote(self, url: str) -> None:
-        try:
-            access_token = os.environ["ACCESS_TOKEN"]
-        except KeyError:
-            raise click.ClickException(
-                "You must setup a CI variable in the Gitlab process called ACCESS_TOKEN\n"
-                "See https://docs.gitlab.com/ee/ci/variables/#for-a-project"
-            )
-        git("config", "user.email", os.environ["GITLAB_USER_EMAIL"])
-        git("config", "user.name", os.environ["GITLAB_USER_NAME"])
-        url = url.split("@")[-1]
-        git("remote", "add", GITLAB_REMOTE, f"https://oauth2:{access_token}@{url}")
-
-    def get_remote(self) -> str:
-        url = os.environ["CI_REPOSITORY_URL"]
-        self._setup_remote(url)
-        return GITLAB_REMOTE
-
-    def push(
-        self, *args: str, variables: dict[str, str] | None = None, skip_ci: bool = False
-    ):
-        opts = []
-        if skip_ci:
-            opts.extend(["-o", "ci.skip"])
-        if variables:
-            for key, value in variables.items():
-                opts.extend(
-                    [
-                        "-o",
-                        f"ci.variable={key}={value}",
-                    ]
-                )
-        git("push", *args, *opts)
 
     def init_remote_repo(
         self, remote_url: str, access_token: str, save_token: bool
@@ -375,13 +396,32 @@ class GitlabBackend(Backend):
             )
 
 
-class TestGitlabBackend(GitlabBackend):
-    supports_push_options = False
+class LocalRuntime(Runtime):
+    def current_branch(self) -> str:
+        branch = git("branch", "--show-current", capture=True)
+        if not branch:
+            raise RuntimeError
+        return branch
 
+    def get_base_rev(self) -> str:
+        try:
+            return git("rev-parse", "HEAD^", capture=True)
+        except subprocess.CalledProcessError:
+            return "0000000000000000000000000000000000000000"
+
+    def get_remote(self) -> str:
+        return "origin"
+
+
+class TestGitlabRuntime(GitlabRuntime):
     @cache
     def _setup_remote(self, url: str) -> None:
         git("config", "user.email", os.environ["GITLAB_USER_EMAIL"])
         git("config", "user.name", os.environ["GITLAB_USER_NAME"])
+
+
+class TestGitlabBackend(GitlabBackend):
+    supports_push_options = False
 
     @cache
     def _gitlab_project(
@@ -393,7 +433,7 @@ class TestGitlabBackend(GitlabBackend):
 
     def push(
         self, *args: str, variables: dict[str, str] | None = None, skip_ci: bool = False
-    ):
+    ) -> None:
         if variables:
             json_file = os.path.join(os.environ["CI_REPOSITORY_URL"], "push-opts.json")
             click.echo(f"Writing local output to {json_file}")
@@ -462,7 +502,8 @@ def is_pending_bump(remote: str, branch: str, folder: Path) -> bool:
     # Find the closest promotion note to the current branch
     promotion_rev = get_promotion_marker(remote)
     if promotion_rev is None:
-        click.echo("No promote marker found")
+        if CONFIG.verbose:
+            click.echo("No promote marker found", err=True)
         return True
 
     cwd = os.getcwd()
@@ -540,7 +581,13 @@ def get_tag_for_branch(remote: str, branch: str, folder: Path) -> str:
     Raises:
         RuntimeError: If the command does not generate an output or fails to determine the tag.
     """
-    release_id = CONFIG.branch_to_release_id[branch]
+    try:
+        release_id = CONFIG.branch_to_release_id[branch]
+    except KeyError:
+        raise click.ClickException(
+            f"{branch} is not a valid release branch.  "
+            f"Must be one of {', '.join(CONFIG.branches)}"
+        )
 
     increment = "patch"
 
@@ -594,9 +641,9 @@ def get_modified_projects(base_rev: str | None = None) -> list[Path]:
     Args:
         base_rev: The Git revision to compare against when identifying changed files
     """
-    backend = get_backend()
     if not base_rev:
-        base_rev = backend.get_base_rev()
+        runtime = get_runtime()
+        base_rev = runtime.get_base_rev()
 
     # Compare the current commit with the branch you want to merge with:
     # FIXME: do not included deleted files
@@ -622,7 +669,7 @@ def get_modified_projects(base_rev: str | None = None) -> list[Path]:
     return list(results)
 
 
-@click.group()
+@click.group(context_settings=CONTEXT_SETTINGS)
 @click.option("--config", "-c", "config_path", metavar="CONFIG", type=str)
 @click.option("--verbose", "-v", is_flag=True, default=False)
 def cli(config_path: str, verbose: bool) -> None:
@@ -725,9 +772,11 @@ def autotag(annotation: str, base_rev: str | None) -> None:
     """
     Automatically tag the current branch with a new version number and push the tag to the remote repository.
     """
+    runtime = get_runtime()
+    branch = runtime.current_branch()
+    remote = runtime.get_remote()
+
     backend = get_backend()
-    branch = backend.current_branch()
-    remote = backend.get_remote()
 
     project_folders = get_modified_projects(base_rev)
     if project_folders:
@@ -755,9 +804,9 @@ def hotfix() -> None:
     """
     Handle automatic hotfix merging from a feature branch back to its upstream branch.
     """
-    backend = get_backend()
-    remote = backend.get_remote()
-    branch = backend.current_branch()
+    runtime = get_runtime()
+    branch = runtime.current_branch()
+    remote = runtime.get_remote()
     upstream_branch = get_upstream_branch(branch)
     if not upstream_branch:
         click.echo(f"No branch upstream from {branch}. Skipping auto-merge")
@@ -795,7 +844,7 @@ def hotfix() -> None:
     variables = {
         f"{ENVVAR_PREFIX}_AUTOTAG_ANNOTATION": msg,
     }
-    backend.push(remote, upstream_branch, variables=variables)
+    get_backend().push(remote, upstream_branch, variables=variables)
 
 
 @cli.command()
@@ -804,7 +853,8 @@ def promote() -> None:
     Promote changes through the branch hierarchy from alpha -> beta -> rc -> stable.
     """
     backend = get_backend()
-    remote = backend.get_remote()
+    runtime = get_runtime()
+    remote = runtime.get_remote()
     if CONFIG.verbose:
         click.echo(f"remote = {remote}")
 

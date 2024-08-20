@@ -725,6 +725,7 @@ def get_runner_env(
         "ACCESS_TOKEN": ACCESS_TOKEN,
         "GITLAB_USER_EMAIL": "foo@bar.com",
         "GITLAB_USER_NAME": "fakeuser",
+        "GITLAB_CI": "false",
     }
 
 

@@ -5,7 +5,6 @@ import subprocess
 import re
 import os.path
 
-import click
 
 from functools import lru_cache
 from typing import overload, Literal, Iterable, Match, Pattern, Iterator
@@ -84,7 +83,6 @@ def git(
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL if quiet else None,
         ).stdout.strip()
-        click.echo(output)
         return output
     else:
         return subprocess.run(
