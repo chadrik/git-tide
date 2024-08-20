@@ -109,7 +109,7 @@ class Config:
     stable: str = "master"
     rc: str | None = None
     beta: str | None = None
-    alpha: str | None = None  # FIXME: support alpha
+    alpha: str | None = None
     # branches in order from most-experimental to stable
     branches: list[str] = field(default_factory=list)
     # branch name to pre-release name (alpha, beta, rc). None for stable.
@@ -200,8 +200,6 @@ class Backend:
     Interact with a remote git backend.
     """
 
-    supports_push_options: bool
-
     def push(
         self, *args: str, variables: dict[str, str] | None = None, skip_ci: bool = False
     ) -> None:
@@ -226,7 +224,7 @@ class Backend:
             remote_name: name of the git remote, used to query the url
         """
         # initialize the local repo
-        git("fetch", remote_name)
+        git("fetch", remote_name, quiet=CONFIG.verbose)
 
         if CONFIG.verbose:
             git("branch", "-la")
@@ -239,7 +237,8 @@ class Backend:
             if branch_exists(branch):
                 if branch != CONFIG.stable:
                     click.echo(
-                        f"{branch} already exists. This can potentially cause problems"
+                        f"{branch} already exists. This can potentially cause problems",
+                        err=True,
                     )
             else:
                 git("branch", "-f", branch, CONFIG.stable)
@@ -298,8 +297,6 @@ class GitlabBackend(Backend):
     """Gitlab-specific behavior"""
 
     PROMOTION_SCHEDULED_JOB_NAME = "Promote Gitflow Branches"
-
-    supports_push_options = True
 
     @cache
     def _gitlab_project(
@@ -381,7 +378,8 @@ class GitlabBackend(Backend):
         click.echo("Setup protected branches")
 
         if not self._find_promote_job(project):
-            # this must happen after the branch has been created in the remote and initial commit pushed
+            # this must happen after the branch has been created in the remote and initial
+            # commit pushed
             schedule = project.pipelineschedules.create(
                 {
                     "ref": CONFIG.stable,
@@ -898,8 +896,9 @@ def promote() -> None:
         click.echo("Pushing changes")
         backend.push("--atomic", remote, branch, variables=variables)
 
+        # FIXME: switch to using push-opts.json
         if (
-            not backend.supports_push_options
+            isinstance(backend, TestGitlabBackend)
             and upstream_branch
             and base_rev != current_rev()
         ):
