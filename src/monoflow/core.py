@@ -18,10 +18,11 @@ from functools import lru_cache
 from urllib.parse import urlparse, urlunparse
 from abc import abstractmethod
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from .gitutils import git, get_tags, branch_exists, checkout, current_rev, join, GitRepo
 
-if False:
+if TYPE_CHECKING:
     import gitlab.v4.objects
 
 
@@ -41,6 +42,8 @@ cache = lru_cache(maxsize=None)
 
 
 class ReleaseID(str, Enum):
+    """Represents semver pre-releases, plus 'stable' (i.e. non-pre-release)"""
+
     alpha = "alpha"
     beta = "beta"
     rc = "rc"
@@ -149,7 +152,13 @@ class Backend:
 
     @abstractmethod
     def get_base_rev(self) -> str:
-        pass
+        """
+        Get the git revision that represents the state of the repo before the changes
+        that triggered the current pipeline
+
+        The files changed after this revision will be used to determine which
+        project tags to increment.
+        """
 
     @abstractmethod
     def get_remote(self) -> str:
@@ -224,7 +233,9 @@ class GitlabBackend(Backend):
     supports_push_options = True
 
     @cache
-    def _gitlab_project(self, base_url: str, access_token: str, project_and_ns: str):
+    def _gitlab_project(
+        self, base_url: str, access_token: str, project_and_ns: str
+    ) -> gitlab.v4.objects.Project:
         try:
             import gitlab
         except ImportError:
@@ -566,9 +577,6 @@ def get_modified_projects(base_rev: str | None = None) -> list[Path]:
     # find the deepest project that the file belongs to
     projects = list(reversed(get_projects()))
 
-    print(all_files)
-    print(projects)
-
     results = set()
     for changed_file in all_files:
         for project in projects:
@@ -799,6 +807,8 @@ def promote() -> None:
 
         if remote:
             # Trigger test/tag jobs for these new versions, but skip auto-hotfix
+            # --atomic means if there's a failure to push any of the refs, the entire
+            # operation will fail (like a databases).  May not be strictly necessary here.
             args = [
                 "push",
                 "--atomic",

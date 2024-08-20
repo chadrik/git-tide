@@ -162,10 +162,19 @@ def checkout(remote: str | None, branch: str, create: bool = False) -> str:
 
 
 def current_rev() -> str:
+    """
+    Get the SHA for the current git revision.
+    """
     return git("rev-parse", "HEAD", capture=True)
 
 
 def branch_exists(branch: str) -> bool:
+    """
+    Return whether the given branch exists.
+
+    Args:
+        branch: branch name
+    """
     try:
         git("rev-parse", "--verify", branch, quiet=True)
     except subprocess.CalledProcessError:
