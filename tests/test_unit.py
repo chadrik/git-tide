@@ -28,7 +28,7 @@ from typing import Generator, Literal, overload
 
 import click
 
-from monoflow.gitutils import (
+from tide.gitutils import (
     checkout,
     get_branches,
     get_latest_commit,
@@ -37,7 +37,7 @@ from monoflow.gitutils import (
     join,
 )
 
-from monoflow.core import (
+from tide.core import (
     GitlabBackend,
     get_upstream_branch,
     get_modified_projects,
@@ -312,7 +312,7 @@ major_version_zero = false
             git("push", "origin", "--delete", *tags)
         git("prune")
 
-    _monoflow("init", "--access-token", ACCESS_TOKEN, "--remote=origin")
+    _tide("init", "--access-token", ACCESS_TOKEN, "--remote=origin")
 
     # make initial tags
     for project in PROJECTS:
@@ -524,22 +524,20 @@ def wait_for_job(
 
 
 @overload
-def _monoflow(*args: str, capture: Literal[True]) -> str:
+def _tide(*args: str, capture: Literal[True]) -> str:
     pass
 
 
 @overload
-def _monoflow(*args: str) -> subprocess.CompletedProcess[str]:
+def _tide(*args: str) -> subprocess.CompletedProcess[str]:
     pass
 
 
-def _monoflow(
-    *args: str, capture: bool = False
-) -> str | subprocess.CompletedProcess[str]:
+def _tide(*args: str, capture: bool = False) -> str | subprocess.CompletedProcess[str]:
     cmd = [
         sys.executable,
         "-m",
-        "monoflow",
+        "tide",
     ]
     if VERBOSE:
         cmd.append("--verbose")
@@ -614,7 +612,7 @@ def run_autotag(
             ]
             if base_rev:
                 args.extend(["--base-rev", base_rev])
-            _monoflow(*args)
+            _tide(*args)
 
 
 def run_promote(
@@ -652,7 +650,7 @@ def run_promote(
             gitlab_ci_local("promote", runner_env)
         else:
             time.sleep(DELAY)
-            _monoflow("promote")
+            _tide("promote")
 
         json_file = os.path.join(remote_data.remote_url, "push-data.json")
         click.echo(f"Reading local output from {json_file}")
@@ -690,7 +688,7 @@ def run_hotfix(
             gitlab_ci_local(job_name, runner_env)
         else:
             time.sleep(DELAY)
-            _monoflow("hotfix")
+            _tide("hotfix")
 
 
 def get_runner_env(
@@ -872,8 +870,8 @@ def pipeline(
 @pytest.mark.unit
 def test_get_modified_projects(config) -> None:
     # Note: we patch core.git and not gitutils.git, bc it's already imported
-    with patch("monoflow.core.git") as mock_git, patch(
-        "monoflow.core.get_projects"
+    with patch("tide.core.git") as mock_git, patch(
+        "tide.core.get_projects"
     ) as mock_get_projects:
         mock_git.return_value = "\n".join(
             [
@@ -957,7 +955,7 @@ def test_checkout_existing_branch() -> None:
     remote = "origin"
     branch = "main"
 
-    with patch("monoflow.gitutils.git") as mock_git:
+    with patch("tide.gitutils.git") as mock_git:
         checkout(remote, branch)
 
     mock_git.assert_has_calls(
@@ -974,7 +972,7 @@ def test_checkout_new_branch() -> None:
     branch = "feature/123"
     create = True
 
-    with patch("monoflow.gitutils.git") as mock_git:
+    with patch("tide.gitutils.git") as mock_git:
         checkout(remote, branch, create)
 
     mock_git.assert_has_calls(
@@ -991,7 +989,7 @@ def test_checkout_local_branch() -> None:
     remote = None
     branch = "bugfix/456"
 
-    with patch("monoflow.gitutils.git") as mock_git:
+    with patch("tide.gitutils.git") as mock_git:
         checkout(remote, branch)
 
     mock_git.assert_has_calls(
@@ -1005,7 +1003,7 @@ def test_checkout_local_new_branch() -> None:
     branch = "feature/789"
     create = True
 
-    with patch("monoflow.gitutils.git") as mock_git:
+    with patch("tide.gitutils.git") as mock_git:
         checkout(remote, branch, create)
 
     mock_git.assert_has_calls(
@@ -1022,7 +1020,7 @@ def test_checkout_git_command_failure() -> None:
     remote = "origin"
     branch = "main"
 
-    with patch("monoflow.gitutils.git") as mock_git:
+    with patch("tide.gitutils.git") as mock_git:
         mock_git.side_effect = subprocess.CalledProcessError(1, "git")
         with pytest.raises(subprocess.CalledProcessError):
             checkout(remote, branch)
@@ -1033,7 +1031,7 @@ def test_get_branches() -> None:
     expected_branches = ["main", "feature/123", "bugfix/456"]
     mocked_stdout = "\n".join([f"  {branch}" for branch in expected_branches])
 
-    with patch("monoflow.gitutils.git") as mock_git:
+    with patch("tide.gitutils.git") as mock_git:
         mock_git.return_value = mocked_stdout
         branches = get_branches()
 
@@ -1045,7 +1043,7 @@ def test_get_branches() -> None:
 def test_get_branches_empty() -> None:
     mocked_stdout = ""
 
-    with patch("monoflow.gitutils.git") as mock_git:
+    with patch("tide.gitutils.git") as mock_git:
         mock_git.return_value = mocked_stdout
         branches = get_branches()
 
@@ -1055,7 +1053,7 @@ def test_get_branches_empty() -> None:
 
 @pytest.mark.unit
 def test_get_branches_git_command_failure() -> None:
-    with patch("monoflow.gitutils.git") as mock_git:
+    with patch("tide.gitutils.git") as mock_git:
         mock_git.side_effect = subprocess.CalledProcessError(1, "git")
         with pytest.raises(subprocess.CalledProcessError):
             get_branches()
@@ -1073,7 +1071,7 @@ def test_get_latest_commit_with_remote() -> None:
     remote = "origin"
     expected_commit_hash = "abcdef123456"
 
-    with patch("monoflow.gitutils.git") as mock_git:
+    with patch("tide.gitutils.git") as mock_git:
         mock_git.return_value = expected_commit_hash
         commit_hash = get_latest_commit(remote, branch_name)
 
@@ -1088,7 +1086,7 @@ def test_get_latest_commit_without_remote() -> None:
     remote = None
     expected_commit_hash = "abcdef123456"
 
-    with patch("monoflow.gitutils.git") as mock_git:
+    with patch("tide.gitutils.git") as mock_git:
         mock_git.return_value = expected_commit_hash
         commit_hash = get_latest_commit(remote, branch_name)
 
@@ -1101,7 +1099,7 @@ def test_get_latest_commit_git_command_failure() -> None:
     branch_name = "main"
     remote = "origin"
 
-    with patch("monoflow.gitutils.git") as mock_git:
+    with patch("tide.gitutils.git") as mock_git:
         mock_git.side_effect = subprocess.CalledProcessError(1, "git")
         with pytest.raises(subprocess.CalledProcessError):
             get_latest_commit(remote, branch_name)
@@ -1112,7 +1110,7 @@ def test_get_remote_in_ci_environment(monkeypatch) -> None:
     url = "https://gitlab-ci-token:[MASKED]@gitlab.example.com/someproject/"
 
     setup_runner_env(monkeypatch, url, "fakecommit", "basebaserev", "beta")
-    with patch("monoflow.core.git") as mock_git:
+    with patch("tide.core.git") as mock_git:
         mock_git.return_value = None
 
         assert GitlabBackend().get_remote() == "gitlab_origin"

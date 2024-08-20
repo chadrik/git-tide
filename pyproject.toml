@@ -1,10 +1,10 @@
 [tool.poetry]
-name = "monoflow"
+name = "git-tide"
 packages = [
-    { include = "monoflow", from = "src" },
+    { include = "tide", from = "src" },
 ]
 version = "0.1.0"
-description = "CLI for gitflow-style branching in a monorepo"
+description = "CLI for automated gitflow-style branching"
 authors = ["Chad Dombrova", "Matt Collie"]
 
 [tool.poetry.dependencies]
@@ -17,7 +17,7 @@ python-gitlab = { version = "4.8.0", optional = true }
 init = ["python-gitlab"]
 
 [tool.poetry.scripts]
-monoflow = "monoflow.core:main"
+tide = "tide.core:main"
 
 [build-system]
 requires = ["poetry-core"]
@@ -36,7 +36,7 @@ markers = [
     "unit: mark a test as a unit test"
 ]
 
-[tool.monoflow]
+[tool.tide]
 branches.beta = "develop"
 branches.rc = "staging"
 branches.stable = "master"

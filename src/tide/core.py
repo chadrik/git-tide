@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     import gitlab.v4.objects
 
 
-TOOL_NAME = "monoflow"
+TOOL_NAME = "tide"
 ENVVAR_PREFIX = TOOL_NAME.upper()
 PROMOTION_BASE_MSG = "promotion base"
 HERE = os.path.dirname(__file__)
@@ -669,7 +669,7 @@ def init(
     init_remote: bool,
 ) -> None:
     """
-    Initialize the current git repo and its associated Gitlab project for use with monoflow.
+    Initialize the current git repo and its associated Gitlab project for use with tide.
 
     This command must be run from a git repo, and the repo must have the Gitlab project setup
     as a remote, either by being cloned from it, or via `git remote add`.

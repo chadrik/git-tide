@@ -215,13 +215,13 @@ def docs(session: nox.Session) -> None:
         session.run("mkdocs", "serve", "--dev-addr", "localhost:8000")
 
 
-def monoflow(session: nox.Session, *args: str) -> None:
+def tide(session: nox.Session, *args: str) -> None:
     # do not install the [init] extras
     if "CI" in os.environ:
         session.install("-e", ".")
     else:
         session.install(".")
-    session.run("python", "-m", "monoflow", *(list(args) + session.posargs))
+    session.run("python", "-m", "tide", *(list(args) + session.posargs))
 
 
 @nox.session(tags=["ci"], reuse_venv=True)
@@ -233,7 +233,7 @@ def autotag(session: nox.Session) -> None:
     Args:
         session: The Nox session context.
     """
-    monoflow(session, "autotag")
+    tide(session, "autotag")
 
 
 @nox.session(tags=["ci"], reuse_venv=True)
@@ -244,7 +244,7 @@ def hotfix(session: nox.Session) -> None:
     Args:
         session: The Nox session context.
     """
-    monoflow(session, "hotfix")
+    tide(session, "hotfix")
 
 
 @nox.session(tags=["ci"], reuse_venv=True)
@@ -255,4 +255,4 @@ def promote(session: nox.Session) -> None:
     Args:
         session: The Nox session context.
     """
-    monoflow(session, "promote")
+    tide(session, "promote")
