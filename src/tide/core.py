@@ -770,7 +770,7 @@ def init(
 )
 def autotag(annotation: str, base_rev: str | None) -> None:
     """
-    Automatically tag the current branch with a new version number and push the tag to the remote repository.
+    Tag the current branch with a new version number and push the tag to the remote repository.
     """
     runtime = get_runtime()
     branch = runtime.current_branch()
@@ -802,7 +802,7 @@ def autotag(annotation: str, base_rev: str | None) -> None:
 @cli.command()
 def hotfix() -> None:
     """
-    Handle automatic hotfix merging from a feature branch back to its upstream branch.
+    Merge hotfixes from a feature branch back to upstream branches.
     """
     runtime = get_runtime()
     branch = runtime.current_branch()
@@ -850,7 +850,9 @@ def hotfix() -> None:
 @cli.command()
 def promote() -> None:
     """
-    Promote changes through the branch hierarchy from alpha -> beta -> rc -> stable.
+    Promote changes through the branch hierarchy.
+
+    e.g. from alpha -> beta -> rc -> stable.
     """
     backend = get_backend()
     runtime = get_runtime()
@@ -940,6 +942,10 @@ def promote() -> None:
 # FIXME: add output format
 # FIXME: add option to write to file
 def projects(modified: bool) -> None:
+    """
+    List project paths within the repo.
+    """
+
     if modified:
         projects_ = get_modified_projects()
     else:
@@ -947,6 +953,39 @@ def projects(modified: bool) -> None:
 
     for project in projects_:
         click.echo(str(project))
+
+
+@cli.command(name="next-version")
+@click.option(
+    "--path",
+    default=".",
+    type=click.Path(exists=True, file_okay=False),
+    show_default=True,
+    help="Folder within the repository. A pyproject.toml should reside in the "
+    "specified directory",
+)
+@click.option(
+    "--branch",
+    default=None,
+    help=(
+        "The release branch to use to determine the next version. "
+        "Defaults to the current branch."
+    ),
+)
+@click.option(
+    "--origin",
+    default="origin",
+    show_default=True,
+    help="The git remote to use to when determining the next version.",
+)
+def next_version(path: str, branch: str | None, remote: str) -> None:
+    """
+    Query the next version.
+    """
+    if branch is None:
+        runtime = get_runtime()
+        branch = runtime.current_branch()
+    click.echo(get_tag_for_branch(remote, branch, Path(path)))
 
 
 def main() -> None:
