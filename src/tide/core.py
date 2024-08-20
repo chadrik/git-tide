@@ -299,9 +299,7 @@ class GitlabBackend(Backend):
     PROMOTION_SCHEDULED_JOB_NAME = "Promote Gitflow Branches"
 
     @cache
-    def _gitlab_project(
-        self, base_url: str, access_token: str, project_and_ns: str
-    ) -> gitlab.v4.objects.Project:
+    def _conn(self, base_url: str, access_token: str) -> gitlab.Gitlab:
         try:
             import gitlab
         except ImportError:
@@ -309,15 +307,11 @@ class GitlabBackend(Backend):
                 f"To use the init command you must run: pip install {TOOL_NAME}[init]"
             )
 
-        gl = gitlab.Gitlab(
+        return gitlab.Gitlab(
             url=base_url,
             private_token=access_token,
             retry_transient_errors=True,
         )
-        try:
-            return gl.projects.get(project_and_ns)
-        except gitlab.exceptions.GitlabGetError:
-            raise click.ClickException(f"Could not find project '{project_and_ns}")
 
     def _find_promote_job(
         self, project: gitlab.v4.objects.Project
@@ -331,6 +325,14 @@ class GitlabBackend(Backend):
     def init_remote_repo(
         self, remote_url: str, access_token: str, save_token: bool
     ) -> None:
+        try:
+            import gitlab.const
+            import gitlab.exceptions
+        except ImportError:
+            raise click.ClickException(
+                f"To use the init command you must run: pip install {TOOL_NAME}[init]"
+            )
+
         if remote_url.endswith(".git"):
             remote_url = remote_url[:-4]
 
@@ -341,24 +343,30 @@ class GitlabBackend(Backend):
         # remove leading "/"
         project_and_ns = url.path[1:]
 
-        project = self._gitlab_project(base_url, access_token, project_and_ns)
+        gl = self._conn(base_url, access_token)
+        try:
+            project = gl.projects.get(project_and_ns)
+        except gitlab.exceptions.GitlabGetError:
+            raise click.ClickException(f"Could not find project '{project_and_ns}")
 
         if save_token:
-            project.variables.create(
-                {
-                    "key": "ACCESS_TOKEN",
-                    "value": access_token,
-                    "protected": True,
-                    "masked": True,
-                }
-            )
-            click.echo("Created ACCESS_TOKEN project variable")
+            try:
+                project.variables.get("ACCESS_TOKEN")
+            except gitlab.exceptions.GitlabGetError:
+                project.variables.create(
+                    {
+                        "key": "ACCESS_TOKEN",
+                        "value": access_token,
+                        "protected": True,
+                        "masked": True,
+                    }
+                )
+                click.echo("Created ACCESS_TOKEN project variable")
+            else:
+                click.echo("ACCESS_TOKEN project variable already exists. Skipping")
         else:
             # FIXME: validate that ACCESS_TOKEN has been set at the project or group level
             pass
-
-        import gitlab.const
-        import gitlab.exceptions
 
         for branch in CONFIG.branches:
             try:
@@ -376,6 +384,9 @@ class GitlabBackend(Backend):
                 p_branch.allow_force_push = True
                 p_branch.save()
         click.echo("Setup protected branches")
+
+        default_branch = CONFIG.most_experimental_branch() or CONFIG.stable
+        gl.projects.update(project.id, {"default_branch": default_branch})
 
         if not self._find_promote_job(project):
             # this must happen after the branch has been created in the remote and initial
@@ -419,15 +430,11 @@ class TestGitlabRuntime(GitlabRuntime):
 
 
 class TestGitlabBackend(GitlabBackend):
-    supports_push_options = False
-
     @cache
-    def _gitlab_project(
-        self, base_url: str, access_token: str, project_and_ns: str
-    ) -> gitlab.v4.objects.Project:
+    def _conn(self, base_url: str, access_token: str) -> gitlab.Gitlab:
         import unittest.mock
 
-        return cast("gitlab.v4.objects.Project", unittest.mock.MagicMock())
+        return cast("gitlab.Gitlab", unittest.mock.MagicMock())
 
     def push(
         self, *args: str, variables: dict[str, str] | None = None, skip_ci: bool = False

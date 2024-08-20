@@ -688,7 +688,7 @@ def run_hotfix(
         src_branch: source of the hotfix
         dst_branch: destination for the hotfix
     """
-    job_name = f"hotfix-{src_branch}-to-{dst_branch}"
+    job_name = "hotfix"
     if isinstance(remote_data, GitlabData):
         job = find_pipeline_job(
             remote_data.project,
@@ -706,7 +706,11 @@ def run_hotfix(
 
 
 def get_runner_env(
-    remote_url: str, latest_commit: str, base_rev: str | None, branch: str
+    config: Config,
+    remote_url: str,
+    latest_commit: str,
+    base_rev: str | None,
+    branch: str,
 ) -> dict[str, str]:
     if not base_rev:
         try:
@@ -725,6 +729,8 @@ def get_runner_env(
         "ACCESS_TOKEN": ACCESS_TOKEN,
         "GITLAB_USER_EMAIL": "foo@bar.com",
         "GITLAB_USER_NAME": "fakeuser",
+        "CI_COMMIT_REF_PROTECTED": "true",
+        "CI_DEFAULT_BRANCH": config.most_experimental_branch() or config.stable,
         "GITLAB_CI": "false",
     }
 
@@ -736,6 +742,7 @@ def setup_runner_env(monkeypatch, env: dict[str, str]):
 
 @contextlib.contextmanager
 def pipeline(
+    config: Config,
     tmp_path_factory,
     branch: str,
     description: str,
@@ -769,7 +776,9 @@ def pipeline(
 
     latest_commit = current_rev()
 
-    runner_env = get_runner_env(remote_data.remote_url, latest_commit, base_rev, branch)
+    runner_env = get_runner_env(
+        config, remote_data.remote_url, latest_commit, base_rev, branch
+    )
 
     if isinstance(remote_data, LocalData):
         setup_runner_env(monkeypatch, runner_env)
@@ -1147,6 +1156,7 @@ def run_promote_and_autotag_jobs(
     """
     # Promote (promote always runs on rc, according to our .gitlab-ci.yml)
     with pipeline(
+        config,
         tmp_path_factory,
         config.rc or config.stable,
         "Promote",
@@ -1167,6 +1177,7 @@ def run_promote_and_autotag_jobs(
     jobs = []
     for tag_arg in tag_args:
         with pipeline(
+            config,
             tmp_path_factory,
             tag_arg["branch"],
             "Post-promotion autotag",
@@ -1224,6 +1235,7 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     msg = f"{config.beta}: (projectA) add feature 1"
     commit_file_and_push(config.beta, msg, folder="projectA")
     with pipeline(
+        config,
         tmp_path_factory,
         config.beta,
         "(ProjectA) Add feature 1 to BETA branch",
@@ -1260,6 +1272,7 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     msg = f"{config.beta}: (projectA) add beta feature 2"
     commit_file_and_push(config.beta, msg, folder="projectA")
     with pipeline(
+        config,
         tmp_path_factory,
         config.beta,
         "(ProjectA) Add beta feature 2 to BETA branch",
@@ -1282,6 +1295,7 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     msg = f"{config.stable}: (projectA) add hotfix"
     commit_file_and_push(config.stable, msg, folder="projectA")
     with pipeline(
+        config,
         tmp_path_factory,
         config.stable,
         "(ProjectA) Add hotfix to STABLE branch",
@@ -1296,6 +1310,7 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
 
     annotation = f"auto-hotfix into {config.rc}: {config.stable}: (projectA) add hotfix"
     with pipeline(
+        config,
         tmp_path_factory,
         config.rc,
         "(ProjectA) Cascade hotfix to RC",
@@ -1312,6 +1327,7 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
         f"auto-hotfix into {config.beta}: {config.stable}: (projectA) add hotfix"
     )
     with pipeline(
+        config,
         tmp_path_factory,
         config.beta,
         "(ProjectA) Cascade hotfix to BETA",
@@ -1329,6 +1345,7 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     msg = f"{config.beta}: (projectB) add feature 1"
     commit_file_and_push(config.beta, msg, folder="projectB")
     with pipeline(
+        config,
         tmp_path_factory,
         config.beta,
         "(ProjectB) Add feature 1 to BETA branch",
@@ -1346,6 +1363,7 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     msg = f"{config.rc}: (projectA) add hotfix 2"
     commit_file_and_push(config.rc, msg, folder="projectA")
     with pipeline(
+        config,
         tmp_path_factory,
         config.rc,
         "(ProjectA) Add hotfix 2 to RC branch",
@@ -1360,6 +1378,7 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
 
     annotation = f"auto-hotfix into {config.beta}: {config.rc}: (projectA) add hotfix 2"
     with pipeline(
+        config,
         tmp_path_factory,
         config.beta,
         "(ProjectA) Cascade hotfix to BETA",
@@ -1514,6 +1533,7 @@ def test_dev_cycle_one_branch(setup_git_repo, monkeypatch, tmp_path_factory) -> 
     msg = f"{config.stable}: (projectA) add feature 1"
     commit_file_and_push(config.stable, msg, folder="projectA")
     with pipeline(
+        config,
         tmp_path_factory,
         config.stable,
         "(ProjectA) Add feature 1 to STABLE branch",
@@ -1530,6 +1550,7 @@ def test_dev_cycle_one_branch(setup_git_repo, monkeypatch, tmp_path_factory) -> 
     msg = f"{config.stable}: (projectB) add feature 1"
     commit_file_and_push(config.stable, msg, folder="projectB")
     with pipeline(
+        config,
         tmp_path_factory,
         config.stable,
         "(projectB) Add feature 1 to STABLE branch",

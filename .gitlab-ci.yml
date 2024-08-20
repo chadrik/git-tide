@@ -35,6 +35,7 @@ stages:
 .tide-base:
   stage: tide
   before_script:
+    - env
     - pip install -e .
 
 auto-tag:
@@ -51,7 +52,7 @@ auto-tag:
       when: never
     - if: $CI_COMMIT_REF_PROTECTED == "true"
 
-.hotfix-base:
+hotfix:
   extends: .tide-base
   # always runs last
   stage: .post
@@ -62,19 +63,10 @@ auto-tag:
   # must be performed serially, in order.
   resource_group: $CI_COMMIT_BRANCH
   rules:
-    - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_TAG
+    # CI_DEFAULT_BRANCH is set to the most experimental branch
+    - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $TIDE_SKIP_HOTFIX == "true"
       when: never
-    - if: $CI_COMMIT_BRANCH == $TARGET_BRANCH && $TIDE_SKIP_HOTFIX != "true"
-
-hotfix-master-to-staging:
-  extends: .hotfix-base
-  variables:
-    TARGET_BRANCH: master
-
-hotfix-staging-to-develop:
-  extends: .hotfix-base
-  variables:
-    TARGET_BRANCH: staging
+    - if: $CI_COMMIT_REF_PROTECTED == "true"
 
 promote:
   extends: .tide-base
