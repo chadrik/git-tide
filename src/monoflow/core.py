@@ -18,7 +18,7 @@ from functools import lru_cache
 from urllib.parse import urlparse, urlunparse
 from abc import abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from .gitutils import git, get_tags, branch_exists, checkout, current_rev, join, GitRepo
 
@@ -125,7 +125,7 @@ class Config:
 
 
 def get_backend(url: str | None = None) -> Backend:
-    if "CI" in os.environ or (url and "gitlab" in url):
+    if os.environ.get("GITLAB_CI", "false") == "true" or (url and "gitlab" in url):
         return GitlabBackend()
     else:
         return TestGitlabBackend()
@@ -174,6 +174,12 @@ class Backend:
             The name of the configured remote
         """
 
+    @abstractmethod
+    def push(
+        self, *args: str, variables: dict[str, str] | None = None, skip_ci: bool = False
+    ):
+        pass
+
     def init_local_repo(self, remote_name: str) -> None:
         """
         Setup the local repository.
@@ -187,11 +193,6 @@ class Backend:
         if CONFIG.verbose:
             git("branch", "-la")
             git("remote", "-v")
-
-        if self.supports_push_options:
-            push_opts = ["-o", "ci.skip"]
-        else:
-            push_opts = []
 
         # setup branches.
         # loop from stable to pre-release branches, bc we set all release_id branches to
@@ -209,7 +210,7 @@ class Backend:
             if branch_exists(remote_branch):
                 git("branch", f"--set-upstream-to={remote_branch}", branch)
             else:
-                git("push", "--set-upstream", remote_name, branch, *push_opts)
+                self.push("--set-upstream", remote_name, branch, skip_ci=True)
 
     @abstractmethod
     def init_remote_repo(
@@ -290,6 +291,22 @@ class GitlabBackend(Backend):
         self._setup_remote(url)
         return GITLAB_REMOTE
 
+    def push(
+        self, *args: str, variables: dict[str, str] | None = None, skip_ci: bool = False
+    ):
+        opts = []
+        if skip_ci:
+            opts.extend(["-o", "ci.skip"])
+        if variables:
+            for key, value in variables.items():
+                opts.extend(
+                    [
+                        "-o",
+                        f"ci.variable={key}={value}",
+                    ]
+                )
+        git("push", *args, *opts)
+
     def init_remote_repo(
         self, remote_url: str, access_token: str, save_token: bool
     ) -> None:
@@ -358,15 +375,32 @@ class GitlabBackend(Backend):
 class TestGitlabBackend(GitlabBackend):
     supports_push_options = False
 
-    def get_remote(self) -> str:
-        """Override to do nothing"""
-        return GITLAB_REMOTE
+    @cache
+    def _setup_remote(self, url: str) -> None:
+        git("config", "user.email", os.environ["GITLAB_USER_EMAIL"])
+        git("config", "user.name", os.environ["GITLAB_USER_NAME"])
 
     @cache
-    def _gitlab_project(self, base_url: str, access_token: str, project_and_ns: str):
+    def _gitlab_project(
+        self, base_url: str, access_token: str, project_and_ns: str
+    ) -> gitlab.v4.objects.Project:
         import unittest.mock
 
-        return unittest.mock.MagicMock()
+        return cast("gitlab.v4.objects.Project", unittest.mock.MagicMock())
+
+    def push(
+        self, *args: str, variables: dict[str, str] | None = None, skip_ci: bool = False
+    ):
+        if variables:
+            json_file = os.path.join(os.environ["CI_REPOSITORY_URL"], "push-opts.json")
+            click.echo(f"Writing local output to {json_file}")
+            if os.path.exists(json_file):
+                os.remove(json_file)
+
+            with open(json_file, "w") as f:
+                json.dump(variables, f)
+
+        git("push", *args)
 
 
 def cz(*args: str, folder: str | Path | None = None) -> str:
@@ -707,9 +741,8 @@ def autotag(annotation: str, base_rev: str | None) -> None:
             git("tag", "-a", tag, "-m", annotation)
 
             # FIXME: we may want to push all tags at once
-            if remote:
-                click.echo(f"Pushing {tag} to remote")
-                git("push", remote, tag)
+            click.echo(f"Pushing {tag} to remote")
+            backend.push(remote, tag)
     else:
         click.echo("No tags generated!", err=True)
 
@@ -739,11 +772,10 @@ def hotfix() -> None:
 
     git("checkout", "-B", f"{branch}_temp")
 
-    if remote:
-        # Fetch the upstream branch
-        git("fetch", remote, upstream_branch)
+    # Fetch the upstream branch
+    git("fetch", remote, upstream_branch)
 
-    base_rev = checkout(remote, upstream_branch, create=True)
+    checkout(remote, upstream_branch, create=True)
 
     msg = HOTFIX_MESSAGE.format(upstream_branch=upstream_branch, message=message)
     click.echo(msg)
@@ -755,18 +787,12 @@ def hotfix() -> None:
         git("diff", "--name-only", "--diff-filter=U")
         raise
 
-    if remote:
-        # this will trigger a full pipeline for upstream_branch, and potentially another auto-merge
-        click.echo(f"Pushing {upstream_branch} to {remote}")
-        if backend.supports_push_options:
-            push_opts = ["-o", f"ci.variable={ENVVAR_PREFIX}_AUTOTAG_ANNOTATION={msg}"]
-        else:
-            push_opts = []
-        git("push", remote, upstream_branch, *push_opts)
-    else:
-        autotag.callback(msg, base_rev)
-        # local mode: cleanup
-        git("branch", "-D", f"{branch}_temp")
+    # this will trigger a full pipeline for upstream_branch, and potentially another auto-merge
+    click.echo(f"Pushing {upstream_branch} to {remote}")
+    variables = {
+        f"{ENVVAR_PREFIX}_AUTOTAG_ANNOTATION": msg,
+    }
+    backend.push(remote, upstream_branch, variables=variables)
 
 
 @cli.command()
@@ -778,6 +804,8 @@ def promote() -> None:
     remote = backend.get_remote()
     if CONFIG.verbose:
         click.echo(f"remote = {remote}")
+
+    local_output = []
 
     def promote_branch(branch: str, log_msg_template: str) -> None:
         """
@@ -793,47 +821,40 @@ def promote() -> None:
             branch=branch, upstream_branch=upstream_branch, release_id=release_id.value
         )
 
-        if remote:
-            click.echo(f"fetching {remote}")
-            git("fetch", remote, branch)
+        click.echo(f"Fetching {remote}/{branch}")
+        git("fetch", remote, branch)
 
         base_rev = checkout(remote, branch, create=True)
 
         if upstream_branch:
-            if remote:
-                git("fetch", remote, upstream_branch)
+            git("fetch", remote, upstream_branch)
+            click.echo(f"Merging with upstream branch {remote}/{upstream_branch}")
             git("merge", join(remote, upstream_branch), "-m", f"{log_msg}")
 
-        if remote:
-            # Trigger test/tag jobs for these new versions, but skip auto-hotfix
-            # --atomic means if there's a failure to push any of the refs, the entire
-            # operation will fail (like a databases).  May not be strictly necessary here.
-            args = [
-                "push",
-                "--atomic",
-                remote,
-                branch,
-            ]
-            if backend.supports_push_options:
-                args.extend(
-                    [
-                        "-o",
-                        f"ci.variable={ENVVAR_PREFIX}_SKIP_HOTFIX=true",
-                        "-o",
-                        f"ci.variable={ENVVAR_PREFIX}_AUTOTAG_ANNOTATION={log_msg}",
-                    ]
-                )
-            git(*args)
-            if not backend.supports_push_options:
-                if upstream_branch and base_rev != current_rev():
-                    command = {
-                        "annotation": log_msg,
-                        "base_rev": base_rev,
-                        "branch": branch,
-                    }
-                    click.echo(f"Trigger: {json.dumps(command)}")
-            elif not remote:
-                autotag.callback(log_msg, base_rev)
+        variables = {
+            f"{ENVVAR_PREFIX}_SKIP_HOTFIX": "true",
+            f"{ENVVAR_PREFIX}_AUTOTAG_ANNOTATION": log_msg,
+            f"{ENVVAR_PREFIX}_AUTOTAG_BASE_REV": base_rev,
+        }
+
+        # Trigger test/tag jobs for these new versions, but skip auto-hotfix
+        # --atomic means if there's a failure to push any of the refs, the entire
+        # operation will fail (like a databases).  May not be strictly necessary here.
+        click.echo("Pushing changes")
+        backend.push("--atomic", remote, branch, variables=variables)
+
+        if (
+            not backend.supports_push_options
+            and upstream_branch
+            and base_rev != current_rev()
+        ):
+            push_info = {
+                "annotation": log_msg,
+                "base_rev": base_rev,
+                "branch": branch,
+            }
+            local_output.append(push_info)
+            click.echo(f"Trigger: {json.dumps(push_info)}")
 
     # Promotion time!
 
@@ -847,6 +868,12 @@ def promote() -> None:
             msg = PROMOTION_MESSAGE
 
         promote_branch(branch, msg)
+
+    if local_output:
+        json_file = os.path.join(os.environ["CI_REPOSITORY_URL"], "push-data.json")
+        click.echo(f"Writing local output to {json_file}")
+        with open(json_file, "w") as f:
+            json.dump(local_output, f)
 
     # Note: we do not make a tag on our cycle-start branch at this time. Instead, we wait
     # for the first commit on the branch to do so.
@@ -867,7 +894,7 @@ def projects(modified: bool) -> None:
         click.echo(str(project))
 
 
-def main():
+def main() -> None:
     import shutil
 
     return cli(

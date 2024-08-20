@@ -23,7 +23,6 @@ from datetime import datetime
 from urllib.parse import urlparse, urlunparse
 from pathlib import Path
 from collections import defaultdict
-from _pytest.monkeypatch import MonkeyPatch
 from unittest.mock import patch, call
 from typing import Generator, Literal, overload
 
@@ -46,9 +45,12 @@ from monoflow.core import (
     set_config,
     Config,
     GITLAB_REMOTE,
+    ENVVAR_PREFIX,
 )
 
-REMOTE_MODE = os.environ.get("REMOTE_MODE", "false").lower() in ("true", "1")
+EXEC_MODE = os.environ.get("EXEC_MODE", "local")
+assert EXEC_MODE in ["local", "remote", "gitlab-ci-local"]
+REMOTE_MODE = EXEC_MODE == "remote"
 
 if REMOTE_MODE:
     try:
@@ -552,8 +554,18 @@ def _monoflow(
         return subprocess.run(cmd, text=True, check=True)
 
 
+def gitlab_ci_local(job_name: str, runner_env: dict[str, str]):
+    options = []
+    remote_path = runner_env["CI_REPOSITORY_URL"]
+    options.extend(["--volume", f"{remote_path}:{remote_path}"])
+    for varname, value in runner_env.items():
+        options.extend(["--variable", f"{varname}={value}"])
+    print(options)
+    subprocess.run(["gitlab-ci-local", job_name] + options, check=True)
+
+
 def run_autotag(
-    branch: str,
+    runner_env,
     remote_data: GitlabData | LocalData,
     annotation: str | None = None,
     base_rev: str | None = None,
@@ -563,7 +575,7 @@ def run_autotag(
     Trigger the 'autotag' command to automatically generate a new git tag.
 
     Args:
-        branch: branch that triggered the pipeline
+        runner_env: dict of env vars used to setup the runner env
         remote_data: Dataclass corresponding to the remote being used
         annotation: A custom annotation message for the git tag. Defaults to "automatic change detected".
         wait: block until the Gitlab job completes.
@@ -578,7 +590,7 @@ def run_autotag(
     if isinstance(remote_data, GitlabData):
         job = find_pipeline_job(
             remote_data.project,
-            re.compile(rf"^auto-tag-{branch}$"),
+            re.compile(r"^auto-tag$"),
             source="push",
             updated_after=datetime.fromisoformat(remote_data.project.updated_at),
         )
@@ -587,26 +599,34 @@ def run_autotag(
         print("autotag job done")
         return job
     else:
-        time.sleep(DELAY)
-        args = [
-            "autotag",
-            f"--annotation={annotation}",
-        ]
-        if base_rev:
-            args.extend(["--base-rev", base_rev])
-        _monoflow(*args)
+        if EXEC_MODE == "gitlab-ci-local":
+            # FIXME: use the push-opts file created by backend.push() to more accurately
+            #  simulate the flow of variables between jobs
+            gitlab_ci_local(
+                "auto-tag",
+                runner_env | {f"{ENVVAR_PREFIX}_AUTOTAG_ANNOTATION": annotation},
+            )
+        else:
+            time.sleep(DELAY)
+            args = [
+                "autotag",
+                f"--annotation={annotation}",
+            ]
+            if base_rev:
+                args.extend(["--base-rev", base_rev])
+            _monoflow(*args)
 
 
 def run_promote(
-    beta: str, remote_data: GitlabData | LocalData, monkeypatch: MonkeyPatch
+    runner_env: dict[str, str],
+    remote_data: GitlabData | LocalData,
 ) -> list[dict[str, str]] | None:
     """
     Promote changes in a git repository to simulate a promotion process handled typically by CI/CD.
 
     Args:
-        breta: name of the beta branch
+        runner_env: dict of env vars used to setup the runner env
         remote_data: Dataclass corresponding to the remote being used
-        monkeypatch (MonkeyPatch): The pytest monkeypatch fixture to mock environment variables.
 
     This function sets the latest commit from the BETA branch as the start of a new cycle,
     checks out the specified branch, and triggers the 'promote' command.
@@ -627,46 +647,78 @@ def run_promote(
         wait_for_job(remote_data.project, job)
         print("promote job done")
         return None
+    else:
+        if EXEC_MODE == "gitlab-ci-local":
+            gitlab_ci_local("promote", runner_env)
+        else:
+            time.sleep(DELAY)
+            _monoflow("promote")
 
-    time.sleep(DELAY)
-    output = _monoflow("promote", capture=True)
-    tag_args = []
-    for line in output.splitlines():
-        if line.startswith("Trigger: "):
-            tag_args.append(json.loads(line.split(": ", 1)[1]))
+        json_file = os.path.join(remote_data.remote_url, "push-data.json")
+        click.echo(f"Reading local output from {json_file}")
+        if os.path.exists(json_file):
+            with open(json_file) as f:
+                tag_args = json.load(f)
+            os.remove(json_file)
+        else:
+            tag_args = []
+        return tag_args
 
-    return tag_args
 
-
-def run_hotfix(branch: str, remote_data: GitlabData | LocalData) -> None:
+def run_hotfix(
+    runner_env, src_branch: str, dst_branch: str, remote_data: GitlabData | LocalData
+) -> None:
     """
     Trigger the 'hotfix' command to handle hotfix operations without affecting minor version increments.
+
+    Args:
+        runner_env: dict of env vars used to setup the runner env
+        src_branch: source of the hotfix
+        dst_branch: destination for the hotfix
     """
+    job_name = f"hotfix-{src_branch}-to-{dst_branch}"
     if isinstance(remote_data, GitlabData):
         job = find_pipeline_job(
             remote_data.project,
-            re.compile(f"^hotfix-{branch}-to-.*$"),
+            re.compile(f"^{job_name}$"),
             source="push",
             updated_after=datetime.fromisoformat(remote_data.project.updated_at),
         )
         wait_for_job(remote_data.project, job)
-        return
+    else:
+        if EXEC_MODE == "gitlab-ci-local":
+            gitlab_ci_local(job_name, runner_env)
+        else:
+            time.sleep(DELAY)
+            _monoflow("hotfix")
 
-    time.sleep(DELAY)
-    _monoflow("hotfix")
+
+def get_runner_env(
+    remote_url: str, latest_commit: str, base_rev: str | None, branch: str
+) -> dict[str, str]:
+    if not base_rev:
+        try:
+            base_rev = git("rev-parse", "HEAD^", capture=True)
+        except subprocess.CalledProcessError:
+            base_rev = "0000000000000000000000000000000000000000"
+
+    title = git("log", "--pretty=format:%s", "-n1", capture=True)
+    return {
+        "CI_REPOSITORY_URL": remote_url,
+        "CI_PIPELINE_SOURCE": "push",
+        "CI_COMMIT_SHA": latest_commit,
+        "CI_COMMIT_BEFORE_SHA": base_rev,
+        "CI_COMMIT_BRANCH": branch,
+        "CI_COMMIT_TITLE": title,
+        "ACCESS_TOKEN": ACCESS_TOKEN,
+        "GITLAB_USER_EMAIL": "foo@bar.com",
+        "GITLAB_USER_NAME": "fakeuser",
+    }
 
 
-def setup_runner_env(
-    monkeypatch, remote_url: str, latest_commit: str, base_rev: str, branch: str
-):
-    configure_environment("CI_REPOSITORY_URL", remote_url, monkeypatch)
-    configure_environment("CI_PIPELINE_SOURCE", "push", monkeypatch)
-    configure_environment("CI_COMMIT_SHA", latest_commit, monkeypatch)
-    configure_environment("CI_COMMIT_BEFORE_SHA", base_rev, monkeypatch)
-    configure_environment("CI_COMMIT_BRANCH", branch, monkeypatch)
-    configure_environment("ACCESS_TOKEN", "abc123", monkeypatch)
-    configure_environment("GITLAB_USER_EMAIL", "foo@bar.com", monkeypatch)
-    configure_environment("GITLAB_USER_NAME", "fakeuser", monkeypatch)
+def setup_runner_env(monkeypatch, env: dict[str, str]):
+    for key, value in env.items():
+        configure_environment(key, value, monkeypatch)
 
 
 @contextlib.contextmanager
@@ -677,7 +729,7 @@ def pipeline(
     remote_data: GitlabData | LocalData,
     monkeypatch,
     base_rev=None,
-) -> Generator[None, None]:
+) -> Generator[dict[str, str], None]:
     """
     Simulate the beginning of a new CI pipeline.
 
@@ -690,9 +742,6 @@ def pipeline(
         monkeypatch: The pytest monkeypatch fixture for setting environment variables.
         base_rev: The git revision that represents the commit before the commit for
             the Gitlab pipeline
-
-    Returns:
-        None
     """
     print()
     print(f"Starting pipeline: {description}")
@@ -705,19 +754,12 @@ def pipeline(
 
     cwd = os.getcwd()
 
+    latest_commit = current_rev()
+
+    runner_env = get_runner_env(remote_data.remote_url, latest_commit, base_rev, branch)
+
     if isinstance(remote_data, LocalData):
-        latest_commit = current_rev()
-
-        if not base_rev:
-            try:
-                base_rev = git("rev-parse", "HEAD^", capture=True)
-            except subprocess.CalledProcessError:
-                base_rev = "0000000000000000000000000000000000000000"
-
-        setup_runner_env(
-            monkeypatch, remote_data.remote_url, latest_commit, base_rev, branch
-        )
-
+        setup_runner_env(monkeypatch, runner_env)
         tmpdir: Path = tmp_path_factory.mktemp(branch)
         print("created temporary directory", tmpdir)
 
@@ -734,7 +776,7 @@ def pipeline(
         print("RUNNER", tmpdir)
         print_git_graph()
 
-    yield
+    yield runner_env
 
     # change to local repo
     os.chdir(cwd)
@@ -1097,13 +1139,18 @@ def run_promote_and_autotag_jobs(
         "Promote",
         remote_data,
         monkeypatch,
-    ):
-        tag_args = run_promote(config.beta, remote_data, monkeypatch)
+    ) as env:
+        tag_args = run_promote(env, remote_data)
 
-    if tag_args is None:
+    if REMOTE_MODE:
+        assert tag_args is None
         tag_args = expected_tag_args
+    else:
+        assert len(tag_args) == len(expected_tag_args)
 
+    print("Tag args")
     pprint.pprint(tag_args)
+
     jobs = []
     for tag_arg in tag_args:
         with pipeline(
@@ -1112,10 +1159,11 @@ def run_promote_and_autotag_jobs(
             "Post-promotion autotag",
             remote_data,
             monkeypatch,
-        ):
+            base_rev=tag_arg["base_rev"],
+        ) as env:
             jobs.append(
                 run_autotag(
-                    tag_arg["branch"],
+                    env,
                     remote_data,
                     annotation=tag_arg["annotation"],
                     base_rev=tag_arg["base_rev"],
@@ -1168,9 +1216,9 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
         "(ProjectA) Add feature 1 to BETA branch",
         remote_data,
         monkeypatch,
-    ):
+    ) as env:
         # this pipeline runs in response to a merged merge request
-        run_autotag(config.beta, remote_data)
+        run_autotag(env, remote_data)
 
     assert latest_tag("projectA-*") == "projectA-1.1.0b0"
 
@@ -1204,9 +1252,9 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
         "(ProjectA) Add beta feature 2 to BETA branch",
         remote_data,
         monkeypatch,
-    ):
+    ) as env:
         # this pipeline runs in response to a merged merge request
-        run_autotag(config.beta, remote_data)
+        run_autotag(env, remote_data)
 
     expected = rf"""
     * {config.beta}: (projectA) add beta feature 2 -  (HEAD -> {config.beta}, tag: projectA-1.2.0b0, origin/{config.beta})
@@ -1226,10 +1274,10 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
         "(ProjectA) Add hotfix to STABLE branch",
         remote_data,
         monkeypatch,
-    ):
+    ) as env:
         # this pipeline runs in response to a merged merge request
-        run_autotag(config.stable, remote_data)
-        run_hotfix(config.stable, remote_data)
+        run_autotag(env, remote_data)
+        run_hotfix(env, config.stable, config.rc, remote_data)
 
     assert latest_tag("projectA-*") == "projectA-1.0.1"
 
@@ -1240,10 +1288,10 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
         "(ProjectA) Cascade hotfix to RC",
         remote_data,
         monkeypatch,
-    ):
+    ) as env:
         # this pipeline runs in response to a push from the pipeline above
-        run_autotag(config.rc, remote_data, annotation=annotation)
-        run_hotfix(config.rc, remote_data)
+        run_autotag(env, remote_data, annotation=annotation)
+        run_hotfix(env, config.rc, config.beta, remote_data)
 
     assert latest_tag("projectA-*") == "projectA-1.1.0rc1"
 
@@ -1256,9 +1304,9 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
         "(ProjectA) Cascade hotfix to BETA",
         remote_data,
         monkeypatch,
-    ):
+    ) as env:
         # this pipeline runs in response to a push from the pipeline above
-        run_autotag(config.beta, remote_data, annotation=annotation)
+        run_autotag(env, remote_data, annotation=annotation)
 
     assert latest_tag("projectA-*") == "projectA-1.2.0b1"
 
@@ -1273,9 +1321,9 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
         "(ProjectB) Add feature 1 to BETA branch",
         remote_data,
         monkeypatch,
-    ):
+    ) as env:
         # this pipeline runs in response to a merged merge request
-        run_autotag(config.beta, remote_data)
+        run_autotag(env, remote_data)
 
     assert latest_tag("projectB-*") == "projectB-1.1.0b0"
 
@@ -1290,10 +1338,10 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
         "(ProjectA) Add hotfix 2 to RC branch",
         remote_data,
         monkeypatch,
-    ):
+    ) as env:
         # this pipeline runs in response to a merged merge request
-        run_autotag(config.rc, remote_data)
-        run_hotfix(config.rc, remote_data)
+        run_autotag(env, remote_data)
+        run_hotfix(env, config.rc, config.beta, remote_data)
 
     assert latest_tag("projectA-*") == "projectA-1.1.0rc2"
 
@@ -1304,9 +1352,9 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
         "(ProjectA) Cascade hotfix to BETA",
         remote_data,
         monkeypatch,
-    ):
+    ) as env:
         # this pipeline runs in response to a push from the pipeline above
-        run_autotag(config.beta, remote_data, annotation=annotation)
+        run_autotag(env, remote_data, annotation=annotation)
 
     assert latest_tag("projectA-*") == "projectA-1.2.0b2"
 
