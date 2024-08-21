@@ -39,6 +39,7 @@ from tide.gitutils import (
 
 from tide.core import (
     GitlabBackend,
+    GitlabRuntime,
     get_upstream_branch,
     get_modified_projects,
     load_config,
@@ -902,8 +903,13 @@ def test_get_modified_projects(config) -> None:
                 "projectA/path.py",
             ]
         )
-        mock_get_projects.return_value = [Path("projectA"), Path("projectB")]
-        assert get_modified_projects(base_rev="fake") == [Path("projectA")]
+        mock_get_projects.return_value = [
+            (Path("projectA"), "projectA"),
+            (Path("projectB"), "projectB"),
+        ]
+        assert get_modified_projects(base_rev="fake") == [
+            (Path("projectA"), "projectA")
+        ]
 
 
 @pytest.mark.unit
@@ -1084,9 +1090,10 @@ def test_get_branches_git_command_failure() -> None:
 
 
 @pytest.mark.unit
-def test_current_branch_in_ci_environment(monkeypatch):
-    setup_runner_env(monkeypatch, "fakeurl", "fakecommit", "basebaserev", "beta")
-    assert GitlabBackend().current_branch() == "beta"
+def test_current_branch_in_ci_environment(config, monkeypatch):
+    runner_env = get_runner_env(config, "fakeurl", "fakecommit", "basebaserev", "beta")
+    setup_runner_env(monkeypatch, runner_env)
+    assert GitlabRuntime().current_branch() == "beta"
 
 
 @pytest.mark.unit
@@ -1130,20 +1137,22 @@ def test_get_latest_commit_git_command_failure() -> None:
 
 
 @pytest.mark.unit
-def test_get_remote_in_ci_environment(monkeypatch) -> None:
+def test_get_remote_in_ci_environment(config, monkeypatch) -> None:
     url = "https://gitlab-ci-token:[MASKED]@gitlab.example.com/someproject/"
 
-    setup_runner_env(monkeypatch, url, "fakecommit", "basebaserev", "beta")
+    runner_env = get_runner_env(config, url, "fakecommit", "basebaserev", "beta")
+    setup_runner_env(monkeypatch, runner_env)
     with patch("tide.core.git") as mock_git:
         mock_git.return_value = None
 
-        assert GitlabBackend().get_remote() == "gitlab_origin"
+        assert GitlabRuntime().get_remote() == "gitlab_origin"
 
 
 @pytest.mark.unit
-def test_get_current_branch_in_ci_environment(monkeypatch) -> None:
-    setup_runner_env(monkeypatch, "fakeurl", "fakecommit", "basebaserev", "beta")
-    assert GitlabBackend().current_branch() == "beta"
+def test_get_current_branch_in_ci_environment(config, monkeypatch) -> None:
+    runner_env = get_runner_env(config, "fakeurl", "fakecommit", "basebaserev", "beta")
+    setup_runner_env(monkeypatch, runner_env)
+    assert GitlabRuntime().current_branch() == "beta"
 
 
 def run_promote_and_autotag_jobs(

@@ -40,16 +40,15 @@ stages:
 
 auto-tag:
   extends: .tide-base
-  script:
-   - echo "Deploying $CI_COMMIT_BRANCH!"
-   - tide autotag --annotation "$TIDE_AUTOTAG_ANNOTATION"
+  script: tide autotag --annotation "$TIDE_AUTOTAG_ANNOTATION"
   # must be performed serially, in order.
-  resource_group: $CI_COMMIT_BRANCH
+  resource_group: $CI_PROJECT_PATH_SLUG-$CI_COMMIT_BRANCH
   variables:
     TIDE_AUTOTAG_ANNOTATION: $CI_COMMIT_TITLE
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_TAG
       when: never
+    # tide init ensures that our gitflow branches are protected
     - if: $CI_COMMIT_REF_PROTECTED == "true"
 
 hotfix:
@@ -58,21 +57,20 @@ hotfix:
   stage: .post
   # it's ok if hotfix does not succeed
   allow_failure: true
-  script:
-   - tide hotfix
+  script: tide hotfix
   # must be performed serially, in order.
-  resource_group: $CI_COMMIT_BRANCH
+  resource_group: $CI_PROJECT_PATH_SLUG-$CI_COMMIT_BRANCH
   rules:
-    # CI_DEFAULT_BRANCH is set to the most experimental branch
+    # tide init ensures that $CI_DEFAULT_BRANCH is set to the most experimental branch
     - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $TIDE_SKIP_HOTFIX == "true"
       when: never
+    # tide init ensures that our gitflow branches are protected
     - if: $CI_COMMIT_REF_PROTECTED == "true"
 
 promote:
   extends: .tide-base
   resource_group: promote
-  script:
-   - tide promote
+  script: tide promote
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule" && $SCHEDULED_JOB_NAME == "promote"
 

@@ -1,3 +1,6 @@
+[project]
+name = "git-tide"
+
 [tool.poetry]
 name = "git-tide"
 packages = [

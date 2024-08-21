@@ -52,6 +52,9 @@ class ReleaseID(str, Enum):
 
 
 def is_url(s: str) -> bool:
+    """
+    Return whether the string looks like a URL.
+    """
     return "://" in s
 
 
@@ -99,6 +102,9 @@ def load_config(path: str | None = None, verbose: bool = False) -> Config:
 
 
 def set_config(config: Config) -> Config:
+    """
+    Set the global configuration object.
+    """
     global CONFIG
     CONFIG = config
     return config
@@ -300,6 +306,9 @@ class GitlabBackend(Backend):
 
     @cache
     def _conn(self, base_url: str, access_token: str) -> gitlab.Gitlab:
+        """
+        Get a cached gitlab connection object.
+        """
         try:
             import gitlab
         except ImportError:
@@ -316,6 +325,9 @@ class GitlabBackend(Backend):
     def _find_promote_job(
         self, project: gitlab.v4.objects.Project
     ) -> gitlab.v4.objects.ProjectPipelineSchedule | None:
+        """
+        Find the scheduled job that is used to trigger promotion.
+        """
         schedules = project.pipelineschedules.list(get_all=True)
         for schedule in schedules:
             if schedule.description == self.PROMOTION_SCHEDULED_JOB_NAME:
@@ -406,6 +418,10 @@ class GitlabBackend(Backend):
 
 
 class LocalRuntime(Runtime):
+    """
+    Used for processes running in local git repos, not in CI.
+    """
+
     def current_branch(self) -> str:
         branch = git("branch", "--show-current", capture=True)
         if not branch:
@@ -419,12 +435,15 @@ class LocalRuntime(Runtime):
             return "0000000000000000000000000000000000000000"
 
     def get_remote(self) -> str:
+        # FIXME: this should probably be configurable somehow, but it's a user pref
+        #  so it shouldn't live in pyproject.toml
         return "origin"
 
 
 class TestGitlabRuntime(GitlabRuntime):
     @cache
     def _setup_remote(self, url: str) -> None:
+        # overridden to prevent adding the oath token to the remote url
         git("config", "user.email", os.environ["GITLAB_USER_EMAIL"])
         git("config", "user.name", os.environ["GITLAB_USER_NAME"])
 
@@ -432,6 +451,7 @@ class TestGitlabRuntime(GitlabRuntime):
 class TestGitlabBackend(GitlabBackend):
     @cache
     def _conn(self, base_url: str, access_token: str) -> gitlab.Gitlab:
+        # overridden to return a mocked Gitlab connection object.
         import unittest.mock
 
         return cast("gitlab.Gitlab", unittest.mock.MagicMock())
@@ -439,6 +459,8 @@ class TestGitlabBackend(GitlabBackend):
     def push(
         self, *args: str, variables: dict[str, str] | None = None, skip_ci: bool = False
     ) -> None:
+        # overridden to write variables to a json object rather than use push options
+        # which are not supported by local git repos.
         if variables:
             json_file = os.path.join(os.environ["CI_REPOSITORY_URL"], "push-opts.json")
             click.echo(f"Writing local output to {json_file}")
@@ -452,6 +474,9 @@ class TestGitlabBackend(GitlabBackend):
 
 
 def cz(*args: str, folder: str | Path | None = None) -> str:
+    """
+    Run commitizen in a subprocess.
+    """
     if CONFIG.verbose:
         click.echo(f"running {args} in {folder}")
     output = subprocess.check_output(
@@ -619,7 +644,7 @@ def get_tag_for_branch(remote: str, branch: str, folder: Path) -> str:
     return tag
 
 
-def get_projects() -> list[Path]:
+def get_projects() -> list[tuple[Path, str | None]]:
     """Get the list of projects within the repo.
 
     A project is a folder with a pyproject.toml file with a `tool.commitizen` section.
@@ -634,11 +659,15 @@ def get_projects() -> list[Path]:
             except KeyError:
                 pass
             else:
-                results.append(Path(os.path.dirname(path)))
+                try:
+                    name = data["project"]["name"]
+                except KeyError:
+                    name = None
+                results.append((Path(path).parent, name))
     return sorted(results)
 
 
-def get_modified_projects(base_rev: str | None = None) -> list[Path]:
+def get_modified_projects(base_rev: str | None = None) -> list[tuple[Path, str | None]]:
     """Get the list of projects with changes files.
 
     A project is defined as a folder with a pyproject.toml file with a `tool.commitizen` section.
@@ -663,15 +692,16 @@ def get_modified_projects(base_rev: str | None = None) -> list[Path]:
             click.echo(f"No modified files between {base_rev} and HEAD", err=True)
 
     # find the deepest project that the file belongs to
-    projects = list(reversed(get_projects()))
+    projects = dict(get_projects())
+    project_dirs = list(reversed(projects))
 
     results = set()
     for changed_file in all_files:
-        for project in projects:
-            if project in Path(changed_file).parents:
-                results.add(project)
+        for project_dir in project_dirs:
+            if project_dir in Path(changed_file).parents:
+                results.add(project_dir)
 
-    return list(results)
+    return [(project_dir, projects[project_dir]) for project_dir in sorted(results)]
 
 
 @click.group(context_settings=CONTEXT_SETTINGS)
@@ -783,9 +813,9 @@ def autotag(annotation: str, base_rev: str | None) -> None:
 
     backend = get_backend()
 
-    project_folders = get_modified_projects(base_rev)
-    if project_folders:
-        for project_folder in project_folders:
+    projects = get_modified_projects(base_rev)
+    if projects:
+        for project_folder, _ in projects:
             # Auto-tag
             tag = get_tag_for_branch(remote, branch, project_folder)
 
@@ -943,13 +973,15 @@ def promote() -> None:
         set_promotion_marker(remote, experimental_branch)
 
 
-@cli.command(name="projects")
+@cli.command
 @click.option("--modified", "-m", is_flag=True, default=False)
 # FIXME: add output format
 # FIXME: add option to write to file
 def projects(modified: bool) -> None:
     """
     List project paths within the repo.
+
+    A project is a folder with a pyproject.toml file with a `tool.commitizen` section.
     """
 
     if modified:
@@ -957,8 +989,10 @@ def projects(modified: bool) -> None:
     else:
         projects_ = get_projects()
 
-    for project in projects_:
-        click.echo(str(project))
+    for project_dir, project_name in projects_:
+        if project_name is None:
+            project_name = "[unset]"
+        click.echo(f"{project_name} = {project_dir}")
 
 
 @cli.command(name="next-version")
@@ -984,9 +1018,9 @@ def projects(modified: bool) -> None:
     show_default=True,
     help="The git remote to use to when determining the next version.",
 )
-def next_version(path: str, branch: str | None, remote: str) -> None:
+def next_tag(path: str, branch: str | None, remote: str) -> None:
     """
-    Query the next version.
+    Get the next tag.
     """
     if branch is None:
         runtime = get_runtime()

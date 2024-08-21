@@ -296,8 +296,6 @@ class GitRepo:
         """
         Return all of the files in the git repo, at the current commit.
         """
-        import subprocess
-
         output = subprocess.check_output(["git", "ls-files"], cwd=self.root)
         return [x for x in output.decode().split("\n") if x]
 
