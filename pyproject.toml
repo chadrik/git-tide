@@ -6,7 +6,7 @@ name = "git-tide"
 packages = [
     { include = "tide", from = "src" },
 ]
-version = "0.1.1"
+version = "0.1.2"
 description = "CLI for automated gitflow-style branching"
 authors = ["Chad Dombrova", "Matt Collie"]
 readme = "README.md"

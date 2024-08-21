@@ -226,6 +226,7 @@ def setup_git_repo(
         ".gitlab-ci.yml",
         "requirements.txt",
         "src",
+        "README.md",
     ]
 
     for relpath in files_to_copy:
