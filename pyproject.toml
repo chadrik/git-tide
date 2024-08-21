@@ -6,9 +6,10 @@ name = "git-tide"
 packages = [
     { include = "tide", from = "src" },
 ]
-version = "0.1.0"
+version = "0.1.1"
 description = "CLI for automated gitflow-style branching"
 authors = ["Chad Dombrova", "Matt Collie"]
+readme = "README.md"
 
 [tool.poetry.dependencies]
 commitizen = "3.16.0"
@@ -20,7 +21,7 @@ python-gitlab = { version = "4.8.0", optional = true }
 init = ["python-gitlab"]
 
 [tool.poetry.scripts]
-tide = "tide.core:main"
+tide = "tide.cli:main"
 
 [build-system]
 requires = ["poetry-core"]

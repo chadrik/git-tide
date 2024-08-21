@@ -3,7 +3,6 @@ from __future__ import absolute_import, print_function, annotations
 import os
 import re
 import subprocess
-import time
 import json
 
 import click
@@ -20,7 +19,7 @@ from abc import abstractmethod
 from enum import Enum
 from typing import TYPE_CHECKING, cast
 
-from .gitutils import git, get_tags, branch_exists, checkout, current_rev, join, GitRepo
+from .gitutils import git, checkout, get_tags, branch_exists, join, current_rev, GitRepo
 
 if TYPE_CHECKING:
     import gitlab.v4.objects
@@ -30,9 +29,7 @@ TOOL_NAME = "tide"
 ENVVAR_PREFIX = TOOL_NAME.upper()
 PROMOTION_BASE_MSG = "promotion base"
 HERE = os.path.dirname(__file__)
-CONFIG: Config
 GITLAB_REMOTE = "gitlab_origin"
-CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
 # FIXME: add these to config file
 HOTFIX_MESSAGE = "auto-hotfix into {upstream_branch}: {message}"
@@ -101,15 +98,6 @@ def load_config(path: str | None = None, verbose: bool = False) -> Config:
     return config
 
 
-def set_config(config: Config) -> Config:
-    """
-    Set the global configuration object.
-    """
-    global CONFIG
-    CONFIG = config
-    return config
-
-
 @dataclass
 class Config:
     stable: str = "master"
@@ -121,6 +109,29 @@ class Config:
     # branch name to pre-release name (alpha, beta, rc). None for stable.
     branch_to_release_id: dict[str, ReleaseID] = field(default_factory=dict)
     verbose: bool = False
+
+    def get_upstream_branch(self, branch: str) -> str | None:
+        """
+        Determine the upstream branch for a given branch name based on configuration.
+
+        Args:
+            branch: The name of the branch for which to find the upstream branch.
+
+        Returns:
+            The name of the upstream branch, or None if there is no upstream branch.
+
+        Raises:
+            ClickException: If the branch is not found in the configuration.
+        """
+        try:
+            index = self.branches.index(branch)
+        except ValueError:
+            raise click.ClickException(f"Invalid branch: {branch}")
+
+        if index > 0:
+            return self.branches[index - 1]
+        else:
+            return None
 
     def most_experimental_branch(self) -> str | None:
         """
@@ -134,35 +145,13 @@ class Config:
             return self.branches[0]
 
 
-def get_backend(url: str | None = None) -> Backend:
-    """
-    Return a Backend corresponding to where the current python process is pushing/pulling.
-    """
-    if os.environ.get("GITLAB_CI", "false") == "true" or (url and "gitlab" in url):
-        return GitlabBackend()
-    else:
-        return TestGitlabBackend()
-
-
-def get_runtime() -> Runtime:
-    """
-    Return a Runtime corresponding to where the current python process is *running*
-    """
-    print(os.environ.get("GITLAB_CI"))
-    if os.environ.get("GITLAB_CI", "false") == "true":
-        return GitlabRuntime()
-    # gitlab-ci-local and our unittests set this to false as an inidicator that
-    # we are testing gitlab, but not IN gitlab.
-    elif os.environ.get("GITLAB_CI") == "false":
-        return TestGitlabRuntime()
-    else:
-        return LocalRuntime()
-
-
 class Runtime:
     """
     Interact with a git repo that is local to the current process
     """
+
+    def __init__(self, config: Config):
+        self.config = config
 
     @abstractmethod
     def current_branch(self) -> str:
@@ -206,6 +195,9 @@ class Backend:
     Interact with a remote git backend.
     """
 
+    def __init__(self, config: Config):
+        self.config = config
+
     def push(
         self, *args: str, variables: dict[str, str] | None = None, skip_ci: bool = False
     ) -> None:
@@ -230,24 +222,24 @@ class Backend:
             remote_name: name of the git remote, used to query the url
         """
         # initialize the local repo
-        git("fetch", remote_name, quiet=CONFIG.verbose)
+        git("fetch", remote_name, quiet=self.config.verbose)
 
-        if CONFIG.verbose:
+        if self.config.verbose:
             git("branch", "-la")
             git("remote", "-v")
 
         # setup branches.
         # loop from stable to pre-release branches, bc we set all release_id branches to
         # the location of stable
-        for branch in reversed(CONFIG.branches):
+        for branch in reversed(self.config.branches):
             if branch_exists(branch):
-                if branch != CONFIG.stable:
+                if branch != self.config.stable:
                     click.echo(
                         f"{branch} already exists. This can potentially cause problems",
                         err=True,
                     )
             else:
-                git("branch", "-f", branch, CONFIG.stable)
+                git("branch", "-f", branch, self.config.stable)
 
             remote_branch = f"{remote_name}/{branch}"
             if branch_exists(remote_branch):
@@ -380,7 +372,7 @@ class GitlabBackend(Backend):
             # FIXME: validate that ACCESS_TOKEN has been set at the project or group level
             pass
 
-        for branch in CONFIG.branches:
+        for branch in self.config.branches:
             try:
                 p_branch = project.protectedbranches.get(branch)
             except gitlab.exceptions.GitlabGetError:
@@ -397,7 +389,7 @@ class GitlabBackend(Backend):
                 p_branch.save()
         click.echo("Setup protected branches")
 
-        default_branch = CONFIG.most_experimental_branch() or CONFIG.stable
+        default_branch = self.config.most_experimental_branch() or self.config.stable
         gl.projects.update(project.id, {"default_branch": default_branch})
 
         if not self._find_promote_job(project):
@@ -405,7 +397,7 @@ class GitlabBackend(Backend):
             # commit pushed
             schedule = project.pipelineschedules.create(
                 {
-                    "ref": CONFIG.stable,
+                    "ref": self.config.stable,
                     "description": self.PROMOTION_SCHEDULED_JOB_NAME,
                     "cron": "6 6 * * 4",
                     "active": False,
@@ -477,8 +469,6 @@ def cz(*args: str, folder: str | Path | None = None) -> str:
     """
     Run commitizen in a subprocess.
     """
-    if CONFIG.verbose:
-        click.echo(f"running {args} in {folder}")
     output = subprocess.check_output(
         ["cz"] + list(args),
         text=True,
@@ -487,31 +477,7 @@ def cz(*args: str, folder: str | Path | None = None) -> str:
     return output
 
 
-def get_upstream_branch(branch: str) -> str | None:
-    """
-    Determine the upstream branch for a given branch name based on configuration.
-
-    Args:
-        branch: The name of the branch for which to find the upstream branch.
-
-    Returns:
-        The name of the upstream branch, or None if there is no upstream branch.
-
-    Raises:
-        ClickException: If the branch is not found in the configuration.
-    """
-    try:
-        index = CONFIG.branches.index(branch)
-    except ValueError:
-        raise click.ClickException(f"Invalid branch: {branch}")
-
-    if index > 0:
-        return CONFIG.branches[index - 1]
-    else:
-        return None
-
-
-def is_pending_bump(remote: str, branch: str, folder: Path) -> bool:
+def is_pending_bump(config: Config, remote: str, branch: str, folder: Path) -> bool:
     """
     Return whether the given branch and folder combination are awaiting a minor bump.
 
@@ -526,13 +492,13 @@ def is_pending_bump(remote: str, branch: str, folder: Path) -> bool:
     from commitizen.config import read_cfg
     from commitizen.providers import ScmProvider
 
-    if branch != CONFIG.most_experimental_branch():
+    if branch != config.most_experimental_branch():
         return False
 
     # Find the closest promotion note to the current branch
     promotion_rev = get_promotion_marker(remote)
     if promotion_rev is None:
-        if CONFIG.verbose:
+        if config.verbose:
             click.echo("No promote marker found", err=True)
         return True
 
@@ -543,7 +509,7 @@ def is_pending_bump(remote: str, branch: str, folder: Path) -> bool:
         # config file for us (note: it supports more than just pyproject.toml).
         provider = ScmProvider(read_cfg())
         matcher = provider._tag_format_matcher()
-        if CONFIG.verbose:
+        if config.verbose:
             click.echo(f"Found promotion base rev: {promotion_rev}")
         # List any tags for this project folder between this branch and the promotion note
         all_tags = get_tags(end_rev=promotion_rev)
@@ -593,7 +559,7 @@ def set_promotion_marker(remote: str, branch: str) -> None:
     git("push", remote, "refs/notes/*")
 
 
-def get_tag_for_branch(remote: str, branch: str, folder: Path) -> str:
+def get_tag_for_branch(config: Config, remote: str, branch: str, folder: Path) -> str:
     """
     Determine the appropriate new tag for a given branch based on the latest changes.
 
@@ -612,17 +578,17 @@ def get_tag_for_branch(remote: str, branch: str, folder: Path) -> str:
         RuntimeError: If the command does not generate an output or fails to determine the tag.
     """
     try:
-        release_id = CONFIG.branch_to_release_id[branch]
+        release_id = config.branch_to_release_id[branch]
     except KeyError:
         raise click.ClickException(
             f"{branch} is not a valid release branch.  "
-            f"Must be one of {', '.join(CONFIG.branches)}"
+            f"Must be one of {', '.join(config.branches)}"
         )
 
     increment = "patch"
 
     # Only apply minor increment the most experimental branch
-    if is_pending_bump(remote, branch, folder):
+    if is_pending_bump(config, remote, branch, folder):
         increment = "minor"
 
     args = [f"--increment={increment}"]
@@ -667,7 +633,9 @@ def get_projects() -> list[tuple[Path, str | None]]:
     return sorted(results)
 
 
-def get_modified_projects(base_rev: str | None = None) -> list[tuple[Path, str | None]]:
+def get_modified_projects(
+    base_rev: str, verbose: bool = False
+) -> list[tuple[Path, str | None]]:
     """Get the list of projects with changes files.
 
     A project is defined as a folder with a pyproject.toml file with a `tool.commitizen` section.
@@ -675,15 +643,11 @@ def get_modified_projects(base_rev: str | None = None) -> list[tuple[Path, str |
     Args:
         base_rev: The Git revision to compare against when identifying changed files
     """
-    if not base_rev:
-        runtime = get_runtime()
-        base_rev = runtime.get_base_rev()
-
     # Compare the current commit with the branch you want to merge with:
     # FIXME: do not included deleted files
     output = git("diff-tree", "--name-only", "-r", base_rev, "HEAD", capture=True)
     all_files = output.splitlines()
-    if CONFIG.verbose:
+    if verbose:
         if all_files:
             click.echo(f"Modified files between {base_rev} and HEAD:")
             for path in all_files:
@@ -704,195 +668,14 @@ def get_modified_projects(base_rev: str | None = None) -> list[tuple[Path, str |
     return [(project_dir, projects[project_dir]) for project_dir in sorted(results)]
 
 
-@click.group(context_settings=CONTEXT_SETTINGS)
-@click.option("--config", "-c", "config_path", metavar="CONFIG", type=str)
-@click.option("--verbose", "-v", is_flag=True, default=False)
-def cli(config_path: str, verbose: bool) -> None:
-    set_config(load_config(config_path, verbose))
-
-
-@cli.command()
-@click.option(
-    "--access-token",
-    required=True,
-    metavar="TOKEN",
-    help="Security token used to authenticate with the remote",
-)
-@click.option(
-    "--remote",
-    default="origin",
-    metavar="REMOTE",
-    show_default=True,
-    help=(
-        "The name of the git remote in the current git repo "
-        "(e.g. configured using `git remote`) or the remote URL. "
-        "Providing a URL implies --no-local"
-    ),
-)
-@click.option(
-    "--save-token/--no-save-token",
-    default=True,
-    help="Whether to save the access token into the remote as a reusable "
-    "variable. If this is disabled, you must configure the ACCESS_TOKEN "
-    "manually.",
-)
-@click.option(
-    "--init-local/--no-local",
-    default=True,
-    help="Whether to initialize the local git repo",
-)
-@click.option(
-    "--init-remote/--no-remote",
-    default=True,
-    help="Whether to initialize the remote git repo (i.e. Gitlab)",
-)
-def init(
-    access_token: str,
-    remote: str,
-    save_token: bool,
-    init_local: bool,
-    init_remote: bool,
-) -> None:
-    """
-    Initialize the current git repo and its associated Gitlab project for use with tide.
-
-    This command must be run from a git repo, and the repo must have the Gitlab project setup
-    as a remote, either by being cloned from it, or via `git remote add`.
-    """
-    import tempfile
-
-    if is_url(remote):
-        init_local = False
-        remote_url = remote
-    else:
-        # FIXME: print a user friendly error if we're not in a git repo.
-        # FIXME: handle remote not setup correctly
-        remote_url = git("remote", "get-url", remote, capture=True)
-
-    backend = get_backend(remote_url)
-
-    if init_local:
-        backend.init_local_repo(remote)
-    else:
-        # we may still need to create branches in the remote, so create a dummy clone
-        with tempfile.TemporaryDirectory() as tmpdir:
-            git("clone", f"--branch={CONFIG.stable}", remote_url, tmpdir)
-            pwd = os.getcwd()
-            try:
-                os.chdir(tmpdir)
-                backend.init_local_repo("origin")
-            finally:
-                os.chdir(pwd)
-
-    # FIXME: add pyproject.toml section?  check if it exists?  Hard to do automatically,
-    #  because in a monorepo there could be many.
-    # FIXME: create a stub gitlab-ci.yml file if it doesn't exist?
-    if init_remote:
-        backend.init_remote_repo(remote_url, access_token, save_token)
-
-
-@cli.command()
-@click.option(
-    "--annotation",
-    default="automatic change detected",
-    show_default=True,
-    help="Message to pass for tag annotations.",
-)
-@click.option(
-    "--base-rev",
-    metavar="SHA",
-    help="The Git revision to compare against when identifying changed files.",
-)
-def autotag(annotation: str, base_rev: str | None) -> None:
-    """
-    Tag the current branch with a new version number and push the tag to the remote repository.
-    """
-    runtime = get_runtime()
-    branch = runtime.current_branch()
-    remote = runtime.get_remote()
-
-    backend = get_backend()
-
-    projects = get_modified_projects(base_rev)
-    if projects:
-        for project_folder, _ in projects:
-            # Auto-tag
-            tag = get_tag_for_branch(remote, branch, project_folder)
-
-            # NOTE: this delay is necessary to create stable sorting of tags
-            # because git's time resolution is 1s (same as unix timestamp).
-            # https://stackoverflow.com/questions/28237043/what-is-the-resolution-of-gits-commit-date-or-author-date-timestamps
-            time.sleep(1.1)
-
-            click.echo(f"Creating new tag: {tag} on branch: {branch} {time.time()}")
-            git("tag", "-a", tag, "-m", annotation)
-
-            # FIXME: we may want to push all tags at once
-            click.echo(f"Pushing {tag} to remote")
-            backend.push(remote, tag)
-    else:
-        click.echo("No tags generated!", err=True)
-
-
-@cli.command()
-def hotfix() -> None:
-    """
-    Merge hotfixes from a feature branch back to upstream branches.
-    """
-    runtime = get_runtime()
-    branch = runtime.current_branch()
-    remote = runtime.get_remote()
-    upstream_branch = get_upstream_branch(branch)
-    if not upstream_branch:
-        click.echo(f"No branch upstream from {branch}. Skipping auto-merge")
-        return
-
-    # Auto-merge
-    # Record the current state
-    message = git("log", "--pretty=format: %s", "-1", capture=True)
-    # strip out previous Automerge formatting
-    match = re.match(
-        HOTFIX_MESSAGE.format(upstream_branch="[^:]+", message="(.*)$"), message
-    )
-    if match:
-        message = match.groups()[0]
-
-    git("checkout", "-B", f"{branch}_temp")
-
-    # Fetch the upstream branch
-    git("fetch", remote, upstream_branch)
-
-    checkout(remote, upstream_branch, create=True)
-
-    msg = HOTFIX_MESSAGE.format(upstream_branch=upstream_branch, message=message)
-    click.echo(msg)
-
-    try:
-        git("merge", f"{branch}_temp", "-m", msg)
-    except subprocess.CalledProcessError:
-        click.echo("Conflicts:", err=True)
-        git("diff", "--name-only", "--diff-filter=U")
-        raise
-
-    # this will trigger a full pipeline for upstream_branch, and potentially another auto-merge
-    click.echo(f"Pushing {upstream_branch} to {remote}")
-    variables = {
-        f"{ENVVAR_PREFIX}_AUTOTAG_ANNOTATION": msg,
-    }
-    get_backend().push(remote, upstream_branch, variables=variables)
-
-
-@cli.command()
-def promote() -> None:
+def promote(config: Config, backend: Backend, runtime: Runtime) -> None:
     """
     Promote changes through the branch hierarchy.
 
     e.g. from alpha -> beta -> rc -> stable.
     """
-    backend = get_backend()
-    runtime = get_runtime()
     remote = runtime.get_remote()
-    if CONFIG.verbose:
+    if config.verbose:
         click.echo(f"remote = {remote}")
 
     local_output = []
@@ -905,8 +688,8 @@ def promote() -> None:
 
         The branch is left checked out.
         """
-        upstream_branch = get_upstream_branch(branch)
-        release_id = CONFIG.branch_to_release_id[branch]
+        upstream_branch = config.get_upstream_branch(branch)
+        release_id = config.branch_to_release_id[branch]
         log_msg = log_msg_template.format(
             branch=branch, upstream_branch=upstream_branch, release_id=release_id.value
         )
@@ -950,10 +733,10 @@ def promote() -> None:
     # Promotion time!
 
     # loop from stable to most experimental
-    for branch in reversed(CONFIG.branches):
+    for branch in reversed(config.branches):
         # It doesn't matter what the active branch is when promote is run: the next thing
         # that we do is checkout CONFIG.stable.
-        if branch == CONFIG.most_experimental_branch():
+        if branch == config.most_experimental_branch():
             msg = PROMOTION_CYCLE_START_MESSAGE
         else:
             msg = PROMOTION_MESSAGE
@@ -968,70 +751,6 @@ def promote() -> None:
 
     # Note: we do not make a tag on our cycle-start branch at this time. Instead, we wait
     # for the first commit on the branch to do so.
-    experimental_branch = CONFIG.most_experimental_branch()
+    experimental_branch = config.most_experimental_branch()
     if experimental_branch:
         set_promotion_marker(remote, experimental_branch)
-
-
-@cli.command
-@click.option("--modified", "-m", is_flag=True, default=False)
-# FIXME: add output format
-# FIXME: add option to write to file
-def projects(modified: bool) -> None:
-    """
-    List project paths within the repo.
-
-    A project is a folder with a pyproject.toml file with a `tool.commitizen` section.
-    """
-
-    if modified:
-        projects_ = get_modified_projects()
-    else:
-        projects_ = get_projects()
-
-    for project_dir, project_name in projects_:
-        if project_name is None:
-            project_name = "[unset]"
-        click.echo(f"{project_name} = {project_dir}")
-
-
-@cli.command(name="next-version")
-@click.option(
-    "--path",
-    default=".",
-    type=click.Path(exists=True, file_okay=False),
-    show_default=True,
-    help="Folder within the repository. A pyproject.toml should reside in the "
-    "specified directory",
-)
-@click.option(
-    "--branch",
-    default=None,
-    help=(
-        "The release branch to use to determine the next version. "
-        "Defaults to the current branch."
-    ),
-)
-@click.option(
-    "--origin",
-    default="origin",
-    show_default=True,
-    help="The git remote to use to when determining the next version.",
-)
-def next_tag(path: str, branch: str | None, remote: str) -> None:
-    """
-    Get the next tag.
-    """
-    if branch is None:
-        runtime = get_runtime()
-        branch = runtime.current_branch()
-    click.echo(get_tag_for_branch(remote, branch, Path(path)))
-
-
-def main() -> None:
-    import shutil
-
-    return cli(
-        auto_envvar_prefix=ENVVAR_PREFIX,
-        max_content_width=shutil.get_terminal_size().columns,
-    )

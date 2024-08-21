@@ -40,14 +40,13 @@ from tide.gitutils import (
 from tide.core import (
     GitlabBackend,
     GitlabRuntime,
-    get_upstream_branch,
     get_modified_projects,
     load_config,
-    set_config,
     Config,
     GITLAB_REMOTE,
     ENVVAR_PREFIX,
 )
+from tide.cli import set_config
 
 EXEC_MODE = os.environ.get("EXEC_MODE", "local")
 assert EXEC_MODE in ["local", "remote", "gitlab-ci-local"]
@@ -633,6 +632,7 @@ def run_autotag(
 def run_promote(
     runner_env: dict[str, str],
     remote_data: GitlabData | LocalData,
+    config: Config,
 ) -> list[dict[str, str]] | None:
     """
     Promote changes in a git repository to simulate a promotion process handled typically by CI/CD.
@@ -646,7 +646,7 @@ def run_promote(
     """
     if isinstance(remote_data, GitlabData):
         # schedule id can become stale?
-        schedule = GitlabBackend()._find_promote_job(remote_data.project)
+        schedule = GitlabBackend(config)._find_promote_job(remote_data.project)
         if schedule:
             schedule.play()
         else:
@@ -945,7 +945,7 @@ def test_get_upstream_branch_with_valid_branch(config) -> None:
     branch = config.stable
     expected_upstream = config.rc
 
-    upstream = get_upstream_branch(branch)
+    upstream = config.get_upstream_branch(branch)
 
     assert upstream == expected_upstream
 
@@ -955,7 +955,7 @@ def test_get_upstream_branch_with_first_branch(config) -> None:
     branch = config.beta
     expected_upstream = None
 
-    upstream = get_upstream_branch(branch)
+    upstream = config.get_upstream_branch(branch)
 
     assert upstream == expected_upstream
 
@@ -966,7 +966,7 @@ def test_get_upstream_branch_with_invalid_branch(config, monkeypatch) -> None:
 
     monkeypatch.setattr(config, "branches", [])
     with pytest.raises(click.ClickException) as excinfo:
-        get_upstream_branch(invalid_branch)
+        config.get_upstream_branch(invalid_branch)
 
     assert str(excinfo.value) == f"Invalid branch: {invalid_branch}"
 
@@ -975,7 +975,7 @@ def test_get_upstream_branch_with_invalid_branch(config, monkeypatch) -> None:
 def test_get_upstream_branch_with_empty_branches(config, monkeypatch) -> None:
     monkeypatch.setattr(config, "branches", [])
     with pytest.raises(click.ClickException) as excinfo:
-        get_upstream_branch(config.beta)
+        config.get_upstream_branch(config.beta)
 
     assert str(excinfo.value) == f"Invalid branch: {config.beta}"
 
@@ -1093,7 +1093,7 @@ def test_get_branches_git_command_failure() -> None:
 def test_current_branch_in_ci_environment(config, monkeypatch):
     runner_env = get_runner_env(config, "fakeurl", "fakecommit", "basebaserev", "beta")
     setup_runner_env(monkeypatch, runner_env)
-    assert GitlabRuntime().current_branch() == "beta"
+    assert GitlabRuntime(config).current_branch() == "beta"
 
 
 @pytest.mark.unit
@@ -1145,18 +1145,22 @@ def test_get_remote_in_ci_environment(config, monkeypatch) -> None:
     with patch("tide.core.git") as mock_git:
         mock_git.return_value = None
 
-        assert GitlabRuntime().get_remote() == "gitlab_origin"
+        assert GitlabRuntime(config).get_remote() == "gitlab_origin"
 
 
 @pytest.mark.unit
 def test_get_current_branch_in_ci_environment(config, monkeypatch) -> None:
     runner_env = get_runner_env(config, "fakeurl", "fakecommit", "basebaserev", "beta")
     setup_runner_env(monkeypatch, runner_env)
-    assert GitlabRuntime().current_branch() == "beta"
+    assert GitlabRuntime(config).current_branch() == "beta"
 
 
 def run_promote_and_autotag_jobs(
-    config, tmp_path_factory, expected_tag_args: list[dict], remote_data, monkeypatch
+    config: Config,
+    tmp_path_factory,
+    expected_tag_args: list[dict],
+    remote_data,
+    monkeypatch,
 ) -> None:
     """
     Execute one or more autotag pipelines.
@@ -1172,7 +1176,7 @@ def run_promote_and_autotag_jobs(
         remote_data,
         monkeypatch,
     ) as env:
-        tag_args = run_promote(env, remote_data)
+        tag_args = run_promote(env, remote_data, config)
 
     if REMOTE_MODE:
         assert tag_args is None
