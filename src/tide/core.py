@@ -474,7 +474,7 @@ def cz(*args: str, folder: str | Path | None = None) -> str:
         text=True,
         cwd=folder,
     )
-    return output
+    return output.strip()
 
 
 def is_pending_bump(config: Config, remote: str, branch: str, folder: Path) -> bool:

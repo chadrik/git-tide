@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .core import (
     is_url,
+    cz,
     get_tag_for_branch,
     get_modified_projects,
     get_projects,
@@ -284,7 +285,7 @@ def projects(modified: bool) -> None:
         click.echo(f"{project_name} = {project_dir}")
 
 
-@cli.command(name="next-tag")
+@cli.command("get-tag")
 @click.option(
     "--path",
     default=".",
@@ -302,19 +303,23 @@ def projects(modified: bool) -> None:
     ),
 )
 @click.option(
-    "--origin",
+    "--remote",
     default="origin",
     show_default=True,
     help="The git remote to use to when determining the next version.",
 )
-def next_tag(path: str, branch: str | None, remote: str) -> None:
+@click.option("--next", "-n", is_flag=True, default=False)
+def get_tag(path: str, branch: str | None, remote: str, next: bool) -> None:
     """
     Get the next tag.
     """
-    if branch is None:
-        runtime = get_runtime()
-        branch = runtime.current_branch()
-    click.echo(get_tag_for_branch(CONFIG, remote, branch, Path(path)))
+    if next:
+        if branch is None:
+            runtime = get_runtime()
+            branch = runtime.current_branch()
+        click.echo(get_tag_for_branch(CONFIG, remote, branch, Path(path)))
+    else:
+        click.echo(cz("version", "--project", folder=path))
 
 
 def main() -> None:
