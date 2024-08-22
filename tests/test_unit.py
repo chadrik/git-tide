@@ -240,6 +240,7 @@ def setup_git_repo(
         else:
             raise TypeError(src)
 
+    # Update the tide section of pyproject.toml
     lines = (
         parent_directory.joinpath("pyproject.toml")
         .read_text()
@@ -248,25 +249,18 @@ def setup_git_repo(
     index = lines.index("[tool.tide]")
     pyproject = tmp_path.joinpath("pyproject.toml")
     lines = lines[: index + 1]
+    lines.append('tag_format = "$project-$version"')
     for release_id, branch in branches.items():
         lines.append(f'branches.{release_id} = "{branch}"')
     new_text = "\n".join(lines)
-    print(new_text)
     pyproject.write_text(new_text)
 
     for project in PROJECTS:
         dest = tmp_path.joinpath(project)
         dest.mkdir(parents=True, exist_ok=True)
         dest.joinpath("pyproject.toml").write_text(f"""\
-[project]
-name = "{project}"
-
-[tool.commitizen]
-name = "cz_conventional_commits"
-tag_format = "{project}-$version"
-version_scheme = "pep440"
-version_provider = "scm"
-major_version_zero = false
+[tool.tide]
+project = "{project}"
 """)
 
     config = set_config(load_config(str(pyproject), verbose=VERBOSE))
@@ -830,7 +824,7 @@ def pipeline(
 #     mock_session.run.return_value = expected_output
 #
 #     # Action
-#     tag = get_tag_for_branch(mock_session, branch)
+#     tag = get_next_tag(mock_session, branch)
 #
 #     # Assert
 #     assert (
@@ -861,7 +855,7 @@ def pipeline(
 #     mock_session.run.return_value = f"tag to create: {expected_tag}"
 #
 #     # Action
-#     tag = get_tag_for_branch(mock_session, branch)
+#     tag = get_next_tag(mock_session, branch)
 #
 #     # Assert
 #     assert tag == expected_tag, f"Expected tag to be '{expected_tag}', got '{tag}'"
@@ -886,7 +880,7 @@ def pipeline(
 #
 #     # Action & Assert
 #     with pytest.raises(RuntimeError) as exc_info:
-#         get_tag_for_branch(mock_session, branch)
+#         get_next_tag(mock_session, branch)
 #     assert "Unexpected output" in str(
 #         exc_info.value
 #     ), "Should raise an error with the output that caused the issue"

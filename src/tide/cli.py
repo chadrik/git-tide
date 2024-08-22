@@ -8,8 +8,8 @@ from pathlib import Path
 
 from .core import (
     is_url,
-    cz,
-    get_tag_for_branch,
+    get_next_tag,
+    get_current_tag,
     get_modified_projects,
     get_projects,
     load_config,
@@ -54,7 +54,6 @@ def get_runtime() -> Runtime:
     """
     Return a Runtime corresponding to where the current python process is *running*
     """
-    print(os.environ.get("GITLAB_CI"))
     if os.environ.get("GITLAB_CI", "false") == "true":
         return GitlabRuntime(CONFIG)
     # gitlab-ci-local and our unittests set this to false as an inidicator that
@@ -179,9 +178,9 @@ def autotag(annotation: str, base_rev: str | None) -> None:
 
     projects = get_modified_projects(base_rev, verbose=CONFIG.verbose)
     if projects:
-        for project_folder, _ in projects:
+        for project_folder, project_name in projects:
             # Auto-tag
-            tag = get_tag_for_branch(CONFIG, remote, branch, project_folder)
+            tag = get_next_tag(CONFIG, remote, branch, project_name, project_folder)
 
             # NOTE: this delay is necessary to create stable sorting of tags
             # because git's time resolution is 1s (same as unix timestamp).
@@ -313,13 +312,25 @@ def get_tag(path: str, branch: str | None, remote: str, next: bool) -> None:
     """
     Get the next tag.
     """
+    projects = dict(get_projects())
+    folder = Path(path)
+    try:
+        project_name = projects[folder]
+    except KeyError:
+        raise click.ClickException(
+            f"There is not a project at path={folder}. "
+            "Ensure there is a pyproject.toml file with a [tool.tide] section "
+            "and a `project` entry"
+        )
+
     if next:
         if branch is None:
             runtime = get_runtime()
             branch = runtime.current_branch()
-        click.echo(get_tag_for_branch(CONFIG, remote, branch, Path(path)))
+
+        click.echo(get_next_tag(CONFIG, remote, branch, project_name, folder))
     else:
-        click.echo(cz("version", "--project", folder=path))
+        click.echo(get_current_tag(CONFIG, project_name, folder))
 
 
 def main() -> None:

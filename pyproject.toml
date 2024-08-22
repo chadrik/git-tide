@@ -6,7 +6,7 @@ name = "git-tide"
 packages = [
     { include = "tide", from = "src" },
 ]
-version = "0.1.2"
+version = "0.1.4"
 description = "CLI for automated gitflow-style branching"
 authors = ["Chad Dombrova", "Matt Collie"]
 readme = "README.md"
@@ -41,13 +41,7 @@ markers = [
 ]
 
 [tool.tide]
+tag_format = "$version"
 branches.beta = "develop"
 branches.rc = "staging"
 branches.stable = "master"
-
-[tool.commitizen]
-name = "cz_conventional_commits"
-tag_format = "$version"
-version_scheme = "pep440"
-version_provider = "scm"
-major_version_zero = false

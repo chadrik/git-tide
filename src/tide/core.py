@@ -1,7 +1,6 @@
 from __future__ import absolute_import, print_function, annotations
 
 import os
-import re
 import subprocess
 import json
 
@@ -23,6 +22,8 @@ from .gitutils import git, checkout, get_tags, branch_exists, join, current_rev,
 
 if TYPE_CHECKING:
     import gitlab.v4.objects
+    import commitizen.providers
+    import commitizen.config
 
 
 TOOL_NAME = "tide"
@@ -83,6 +84,12 @@ def load_config(path: str | None = None, verbose: bool = False) -> Config:
         )
 
     config = Config(verbose=verbose)
+
+    try:
+        config.tag_format = settings["tag_format"]
+    except KeyError:
+        pass
+
     # Loop through branches once and extract all needed information
     for release_id in ReleaseID:
         branch_name = branches.get(release_id.value)
@@ -109,6 +116,7 @@ class Config:
     # branch name to pre-release name (alpha, beta, rc). None for stable.
     branch_to_release_id: dict[str, ReleaseID] = field(default_factory=dict)
     verbose: bool = False
+    tag_format: str = "$version"
 
     def get_upstream_branch(self, branch: str) -> str | None:
         """
@@ -477,7 +485,13 @@ def cz(*args: str, folder: str | Path | None = None) -> str:
     return output.strip()
 
 
-def is_pending_bump(config: Config, remote: str, branch: str, folder: Path) -> bool:
+def is_pending_bump(
+    config: Config,
+    provider: commitizen.providers.ScmProvider,
+    remote: str,
+    branch: str,
+    folder: Path,
+) -> bool:
     """
     Return whether the given branch and folder combination are awaiting a minor bump.
 
@@ -489,9 +503,6 @@ def is_pending_bump(config: Config, remote: str, branch: str, folder: Path) -> b
     Returns:
         whether it is pending or not
     """
-    from commitizen.config import read_cfg
-    from commitizen.providers import ScmProvider
-
     if branch != config.most_experimental_branch():
         return False
 
@@ -502,21 +513,13 @@ def is_pending_bump(config: Config, remote: str, branch: str, folder: Path) -> b
             click.echo("No promote marker found", err=True)
         return True
 
-    cwd = os.getcwd()
-    os.chdir(folder)
-    try:
-        # Use the matching logic from commitizen, which will read the commitizen
-        # config file for us (note: it supports more than just pyproject.toml).
-        provider = ScmProvider(read_cfg())
-        matcher = provider._tag_format_matcher()
-        if config.verbose:
-            click.echo(f"Found promotion base rev: {promotion_rev}")
-        # List any tags for this project folder between this branch and the promotion note
-        all_tags = get_tags(end_rev=promotion_rev)
-        tags = [t for t in all_tags if matcher(t)]
-        return not tags
-    finally:
-        os.chdir(cwd)
+    matcher = provider._tag_format_matcher()
+    if config.verbose:
+        click.echo(f"Found promotion base rev: {promotion_rev}")
+    # List any tags for this project folder between this branch and the promotion note
+    all_tags = get_tags(end_rev=promotion_rev)
+    tags = [t for t in all_tags if matcher(t)]
+    return not tags
 
 
 def get_promotion_marker(remote: str) -> str | None:
@@ -544,7 +547,7 @@ def set_promotion_marker(remote: str, branch: str) -> None:
     """
     Store a state for whether the given project on the given branch needs to have a minor bump.
 
-    If it is true for a given branch, then get_tag_for_branch() will return a minor increment.
+    If it is true for a given branch, then get_next_tag() will return a minor increment.
     After this, autotag() will set the pending state to False until.
 
     This pending state is reset to True after each promotion event.
@@ -559,7 +562,45 @@ def set_promotion_marker(remote: str, branch: str) -> None:
     git("push", remote, "refs/notes/*")
 
 
-def get_tag_for_branch(config: Config, remote: str, branch: str, folder: Path) -> str:
+def _get_cz_config(config: Config, project_name: str) -> commitizen.config.BaseConfig:
+    from commitizen.config.base_config import BaseConfig
+    from commitizen.defaults import Settings
+
+    cz_config = BaseConfig()
+    cz_config.update(
+        Settings(
+            name="cz_conventional_commits",
+            tag_format=config.tag_format.replace("$project", project_name),
+            version_scheme="pep440",
+            version_provider="scm",
+            major_version_zero=False,
+        )
+    )
+    return cz_config
+
+
+def get_current_tag(config: Config, project_name: str, folder: Path) -> str:
+    from commitizen.providers import ScmProvider
+    from commitizen.version_schemes import get_version_scheme
+    from commitizen import bump
+
+    cz_config = _get_cz_config(config, project_name)
+    provider = ScmProvider(cz_config)
+    scheme = get_version_scheme(cz_config)
+    current_version = provider.get_version()
+
+    tag_version = bump.normalize_tag(
+        current_version,
+        tag_format=cz_config.settings["tag_format"],
+        scheme=scheme,
+    )
+
+    return tag_version
+
+
+def get_next_tag(
+    config: Config, remote: str, branch: str, project_name: str, folder: Path
+) -> str:
     """
     Determine the appropriate new tag for a given branch based on the latest changes.
 
@@ -577,6 +618,10 @@ def get_tag_for_branch(config: Config, remote: str, branch: str, folder: Path) -
     Raises:
         RuntimeError: If the command does not generate an output or fails to determine the tag.
     """
+    from commitizen.providers import ScmProvider
+    from commitizen.version_schemes import get_version_scheme, Increment
+    from commitizen import bump
+
     try:
         release_id = config.branch_to_release_id[branch]
     except KeyError:
@@ -585,35 +630,45 @@ def get_tag_for_branch(config: Config, remote: str, branch: str, folder: Path) -
             f"Must be one of {', '.join(config.branches)}"
         )
 
-    increment = "patch"
+    cz_config = _get_cz_config(config, project_name)
+
+    provider = ScmProvider(cz_config)
+    scheme = get_version_scheme(cz_config)
+    current_version = scheme(provider.get_version())
 
     # Only apply minor increment the most experimental branch
-    if is_pending_bump(config, remote, branch, folder):
-        increment = "minor"
+    if is_pending_bump(config, provider, remote, branch, folder):
+        increment: Increment = "MINOR"
+        exact_increment = True
+    else:
+        increment = "PATCH"
+        exact_increment = False
 
-    args = [f"--increment={increment}"]
     if release_id != ReleaseID.stable:
-        args += ["--prerelease", release_id.value]
+        prerelease = release_id.value
+    else:
+        prerelease = None
 
-    if increment == "minor":
-        args += ["--increment-mode=exact"]
+    new_version = current_version.bump(
+        increment,
+        prerelease=prerelease,
+        exact_increment=exact_increment,
+    )
 
-    # run this in the project directory so that the pyproject.toml is accessible.
-    output = cz(*(["bump"] + list(args) + ["--dry-run", "--yes"]), folder=folder)
-    match = re.search("tag to create: (.*)", output)
+    new_tag_version = bump.normalize_tag(
+        new_version,
+        tag_format=cz_config.settings["tag_format"],
+        scheme=scheme,
+    )
 
-    if not match:
-        raise click.ClickException(output)
-
-    tag = match.group(1).strip()
-
-    return tag
+    return new_tag_version
 
 
-def get_projects() -> list[tuple[Path, str | None]]:
+def get_projects() -> list[tuple[Path, str]]:
     """Get the list of projects within the repo.
 
-    A project is a folder with a pyproject.toml file with a `tool.commitizen` section.
+    A project is a folder with a pyproject.toml file with a `tool.tide` section
+    and a `tool.tide.project`.
     """
     results = []
     repo = GitRepo(".")
@@ -621,24 +676,20 @@ def get_projects() -> list[tuple[Path, str | None]]:
         with open(path, "rb") as f:
             data = tomllib.load(f)
             try:
-                data["tool"]["commitizen"]
+                name = data["tool"][TOOL_NAME]["project"]
             except KeyError:
                 pass
             else:
-                try:
-                    name = data["project"]["name"]
-                except KeyError:
-                    name = None
                 results.append((Path(path).parent, name))
     return sorted(results)
 
 
 def get_modified_projects(
     base_rev: str, verbose: bool = False
-) -> list[tuple[Path, str | None]]:
+) -> list[tuple[Path, str]]:
     """Get the list of projects with changes files.
 
-    A project is defined as a folder with a pyproject.toml file with a `tool.commitizen` section.
+    A project is defined as a folder with a pyproject.toml file with a `tool.tide` section.
 
     Args:
         base_rev: The Git revision to compare against when identifying changed files

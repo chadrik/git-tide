@@ -76,6 +76,12 @@ In order for `tide` to work its magic, the Gitlab repo needs to be properly conf
     branches.rc = "staging"
     branches.stable = "master"
     ```
+- For each project within your repo that you want to manage tagged releases, add a `project` entry:
+    ```toml
+    [tool.tide]
+    project = "project_name"
+    ```
+  If there is only one, then combine be sure to put all of your options under a single `[tool.tide]` section.
 - Create a [Project Access Token](https://docs.gitlab.com/ee/user/project/settings/project_access_tokens.html) with the appropriate scope for being able to push tags, changes and create cicd variables.
 - Run `tide init --access-token='YOUR_ACCESS_TOKEN'`
 - Copy and modify the `.gitlab-ci.yml` file ensuring the branch variables match the ones in the `pyproject.toml` (TODO: automated generation of `.gitlab-ci.yml` in `tide init`)
