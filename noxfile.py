@@ -1,18 +1,14 @@
 from __future__ import absolute_import, print_function, annotations
 
 import argparse
+import glob
+
 import nox
 import os
 import shutil
 
 
 HERE = os.path.dirname(__file__)
-
-
-@nox.session(reuse_venv=True)
-def build(session: nox.Session) -> None:
-    session.install("poetry")
-    session.run("poetry", "build")
 
 
 @nox.session(reuse_venv=True)
@@ -256,3 +252,18 @@ def promote(session: nox.Session) -> None:
         session: The Nox session context.
     """
     tide(session, "promote")
+
+
+@nox.session
+def build(session: nox.Session) -> None:
+    os.removedirs("dist")
+    session.run(
+        "uvx", "--from", "build", "pyproject-build", "--installer", "uv", external=True
+    )
+
+
+@nox.session
+def publish(session: nox.Session) -> None:
+    whl = sorted(glob.glob("./dist/git_tide-*-py3-none-any.whl"))[0]
+    print(whl)
+    session.run("uvx", "twine", "upload", whl, external=True)
