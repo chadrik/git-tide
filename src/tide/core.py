@@ -562,7 +562,7 @@ def set_promotion_marker(remote: str, branch: str) -> None:
     git("push", remote, "refs/notes/*")
 
 
-def _get_cz_config(config: Config, project_name: str) -> commitizen.config.BaseConfig:
+def _get_cz_config(tag_format: str, project_name: str) -> commitizen.config.BaseConfig:
     from commitizen.config.base_config import BaseConfig
     from commitizen.defaults import Settings
 
@@ -570,7 +570,7 @@ def _get_cz_config(config: Config, project_name: str) -> commitizen.config.BaseC
     cz_config.update(
         Settings(
             name="cz_conventional_commits",
-            tag_format=config.tag_format.replace("$project", project_name),
+            tag_format=tag_format.replace("$project", project_name),
             version_scheme="pep440",
             version_provider="scm",
             major_version_zero=False,
@@ -579,44 +579,60 @@ def _get_cz_config(config: Config, project_name: str) -> commitizen.config.BaseC
     return cz_config
 
 
-def get_current_tag(config: Config, project_name: str, folder: Path) -> str:
+def get_current_version(
+    config: Config, project_name: str, folder: Path, as_tag: bool = False
+) -> str:
+    """
+    Return the current version.
+
+    Args:
+        project_name: The name of the project, used to look up the commitizen
+            configuration
+        folder: The folder within the repo that controls the tag.
+        as_tag: Whether to format the version based on tool.tide.tag_format
+
+    Returns:
+        The current version or tag
+    """
     from commitizen.providers import ScmProvider
     from commitizen.version_schemes import get_version_scheme
     from commitizen import bump
 
-    cz_config = _get_cz_config(config, project_name)
+    cz_config = _get_cz_config(config.tag_format, project_name)
     provider = ScmProvider(cz_config)
     scheme = get_version_scheme(cz_config)
     current_version = provider.get_version()
 
     tag_version = bump.normalize_tag(
         current_version,
-        tag_format=cz_config.settings["tag_format"],
+        tag_format=cz_config.settings["tag_format"] if as_tag else "$version",
         scheme=scheme,
     )
 
     return tag_version
 
 
-def get_next_tag(
-    config: Config, remote: str, branch: str, project_name: str, folder: Path
+def get_next_version(
+    config: Config,
+    remote: str,
+    branch: str,
+    project_name: str,
+    folder: Path,
+    as_tag: bool = False,
 ) -> str:
     """
-    Determine the appropriate new tag for a given branch based on the latest changes.
-
-    This function uses the Commitizen tool to determine the next tag name for a branch, potentially
-    adjusting for pre-release tags and minor version increments.
+    Return the next version for a given branch based on the latest changes.
 
     Args:
         remote: The remote repository name
         branch: The name of the branch for which to generate the tag.
+        project_name: The name of the project, used to look up the commitizen
+            configuration
         folder: The folder within the repo that controls the tag.
+        as_tag: Whether to format the version based on tool.tide.tag_format
 
     Returns:
-        The new tag to be created
-
-    Raises:
-        RuntimeError: If the command does not generate an output or fails to determine the tag.
+        The next version or tag to be created
     """
     from commitizen.providers import ScmProvider
     from commitizen.version_schemes import get_version_scheme, Increment
@@ -630,7 +646,7 @@ def get_next_tag(
             f"Must be one of {', '.join(config.branches)}"
         )
 
-    cz_config = _get_cz_config(config, project_name)
+    cz_config = _get_cz_config(config.tag_format, project_name)
 
     provider = ScmProvider(cz_config)
     scheme = get_version_scheme(cz_config)
@@ -655,13 +671,11 @@ def get_next_tag(
         exact_increment=exact_increment,
     )
 
-    new_tag_version = bump.normalize_tag(
+    return bump.normalize_tag(
         new_version,
-        tag_format=cz_config.settings["tag_format"],
+        tag_format=cz_config.settings["tag_format"] if as_tag else "$version",
         scheme=scheme,
     )
-
-    return new_tag_version
 
 
 def get_projects() -> list[tuple[Path, str]]:

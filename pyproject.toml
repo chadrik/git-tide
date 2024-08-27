@@ -1,6 +1,6 @@
 [project]
 name = "git-tide"
-version = "0.1.4"
+version = "0.1.5"
 description = "CLI for automated gitflow-style branching"
 authors = [
     {name="Chad Dombrova"},
@@ -28,6 +28,14 @@ tide = "tide.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/tide"]
 
+[tool.hatch.envs.default]
+installer = "uv"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+
 [tool.mypy]
 files = ["noxfile.py", "src"]
 ignore_missing_imports = true
@@ -45,8 +53,3 @@ tag_format = "$version"
 branches.beta = "develop"
 branches.rc = "staging"
 branches.stable = "master"
-
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"

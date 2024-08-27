@@ -8,8 +8,8 @@ from pathlib import Path
 
 from .core import (
     is_url,
-    get_next_tag,
-    get_current_tag,
+    get_next_version,
+    get_current_version,
     get_modified_projects,
     get_projects,
     load_config,
@@ -180,7 +180,9 @@ def autotag(annotation: str, base_rev: str | None) -> None:
     if projects:
         for project_folder, project_name in projects:
             # Auto-tag
-            tag = get_next_tag(CONFIG, remote, branch, project_name, project_folder)
+            tag = get_next_version(
+                CONFIG, remote, branch, project_name, project_folder, as_tag=True
+            )
 
             # NOTE: this delay is necessary to create stable sorting of tags
             # because git's time resolution is 1s (same as unix timestamp).
@@ -284,7 +286,7 @@ def projects(modified: bool) -> None:
         click.echo(f"{project_name} = {project_dir}")
 
 
-@cli.command("get-tag")
+@cli.command
 @click.option(
     "--path",
     default=".",
@@ -308,9 +310,12 @@ def projects(modified: bool) -> None:
     help="The git remote to use to when determining the next version.",
 )
 @click.option("--next", "-n", is_flag=True, default=False)
-def get_tag(path: str, branch: str | None, remote: str, next: bool) -> None:
+@click.option("--as-tag", "-t", is_flag=True, default=False)
+def version(
+    path: str, branch: str | None, remote: str, next: bool, as_tag: bool
+) -> None:
     """
-    Get the next tag.
+    Get the project version
     """
     projects = dict(get_projects())
     folder = Path(path)
@@ -328,9 +333,11 @@ def get_tag(path: str, branch: str | None, remote: str, next: bool) -> None:
             runtime = get_runtime()
             branch = runtime.current_branch()
 
-        click.echo(get_next_tag(CONFIG, remote, branch, project_name, folder))
+        click.echo(
+            get_next_version(CONFIG, remote, branch, project_name, folder, as_tag)
+        )
     else:
-        click.echo(get_current_tag(CONFIG, project_name, folder))
+        click.echo(get_current_version(CONFIG, project_name, folder, as_tag))
 
 
 def main() -> None:
