@@ -488,9 +488,8 @@ def cz(*args: str, folder: str | Path | None = None) -> str:
 def is_pending_bump(
     config: Config,
     provider: commitizen.providers.ScmProvider,
-    remote: str,
     branch: str,
-    folder: Path,
+    remote: str | None = None,
 ) -> bool:
     """
     Return whether the given branch and folder combination are awaiting a minor bump.
@@ -498,7 +497,6 @@ def is_pending_bump(
     Args:
         remote: The remote repository name
         branch: one of the registered gitflow branches
-        folder: folder within the repo that defines commitizen tag rules
 
     Returns:
         whether it is pending or not
@@ -522,14 +520,14 @@ def is_pending_bump(
     return not tags
 
 
-def get_promotion_marker(remote: str) -> str | None:
+def get_promotion_marker(remote: str | None = None) -> str | None:
     """
     Get the hash for the most recent promotion commit.
 
     Args:
         remote: The remote repository name
     """
-    git("fetch", remote, "refs/notes/*:refs/notes/*")
+    git("fetch", remote if remote else "--all", "refs/notes/*:refs/notes/*")
     output = git("log", "--format=%H %N", "-n20", capture=True)
     for line in output.splitlines():
         line = line.strip()
@@ -580,7 +578,7 @@ def _get_cz_config(tag_format: str, project_name: str) -> commitizen.config.Base
 
 
 def get_current_version(
-    config: Config, project_name: str, folder: Path, as_tag: bool = False
+    config: Config, project_name: str | None = None, as_tag: bool = False
 ) -> str:
     """
     Return the current version.
@@ -588,7 +586,6 @@ def get_current_version(
     Args:
         project_name: The name of the project, used to look up the commitizen
             configuration
-        folder: The folder within the repo that controls the tag.
         as_tag: Whether to format the version based on tool.tide.tag_format
 
     Returns:
@@ -597,6 +594,14 @@ def get_current_version(
     from commitizen.providers import ScmProvider
     from commitizen.version_schemes import get_version_scheme
     from commitizen import bump
+
+    if project_name is None:
+        if as_tag:
+            raise ValueError(
+                "If requesting version in tag format, you must " "provide project_name"
+            )
+        else:
+            project_name = "placeholder"
 
     cz_config = _get_cz_config(config.tag_format, project_name)
     provider = ScmProvider(cz_config)
@@ -614,10 +619,9 @@ def get_current_version(
 
 def get_next_version(
     config: Config,
-    remote: str,
     branch: str,
-    project_name: str,
-    folder: Path,
+    remote: str | None = None,
+    project_name: str | None = None,
     as_tag: bool = False,
 ) -> str:
     """
@@ -626,9 +630,7 @@ def get_next_version(
     Args:
         remote: The remote repository name
         branch: The name of the branch for which to generate the tag.
-        project_name: The name of the project, used to look up the commitizen
-            configuration
-        folder: The folder within the repo that controls the tag.
+        project_name: The name of the project, used for tag formatting.
         as_tag: Whether to format the version based on tool.tide.tag_format
 
     Returns:
@@ -646,6 +648,14 @@ def get_next_version(
             f"Must be one of {', '.join(config.branches)}"
         )
 
+    if project_name is None:
+        if as_tag:
+            raise ValueError(
+                "If requesting version in tag format, you must " "provide project_name"
+            )
+        else:
+            project_name = "placeholder"
+
     cz_config = _get_cz_config(config.tag_format, project_name)
 
     provider = ScmProvider(cz_config)
@@ -653,7 +663,7 @@ def get_next_version(
     current_version = scheme(provider.get_version())
 
     # Only apply minor increment the most experimental branch
-    if is_pending_bump(config, provider, remote, branch, folder):
+    if is_pending_bump(config, provider, branch, remote=remote):
         increment: Increment = "MINOR"
         exact_increment = True
     else:

@@ -181,7 +181,7 @@ def autotag(annotation: str, base_rev: str | None) -> None:
         for project_folder, project_name in projects:
             # Auto-tag
             tag = get_next_version(
-                CONFIG, remote, branch, project_name, project_folder, as_tag=True
+                CONFIG, branch, project_name=project_name, remote=remote, as_tag=True
             )
 
             # NOTE: this delay is necessary to create stable sorting of tags
@@ -334,10 +334,14 @@ def version(
             branch = runtime.current_branch()
 
         click.echo(
-            get_next_version(CONFIG, remote, branch, project_name, folder, as_tag)
+            get_next_version(
+                CONFIG, branch, project_name=project_name, remote=remote, as_tag=as_tag
+            )
         )
     else:
-        click.echo(get_current_version(CONFIG, project_name, folder, as_tag))
+        click.echo(
+            get_current_version(CONFIG, project_name=project_name, as_tag=as_tag)
+        )
 
 
 def main() -> None:

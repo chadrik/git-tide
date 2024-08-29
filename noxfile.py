@@ -256,7 +256,7 @@ def promote(session: nox.Session) -> None:
 
 @nox.session
 def build(session: nox.Session) -> None:
-    os.removedirs("dist")
+    shutil.rmtree("dist")
     session.run(
         "uvx", "--from", "build", "pyproject-build", "--installer", "uv", external=True
     )
@@ -264,6 +264,7 @@ def build(session: nox.Session) -> None:
 
 @nox.session
 def publish(session: nox.Session) -> None:
+    build(session)
     whl = sorted(glob.glob("./dist/git_tide-*-py3-none-any.whl"))[0]
     print(whl)
     session.run("uvx", "twine", "upload", whl, external=True)
