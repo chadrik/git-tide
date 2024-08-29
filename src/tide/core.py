@@ -291,7 +291,10 @@ class GitlabRuntime(Runtime):
         git("config", "user.email", os.environ["GITLAB_USER_EMAIL"])
         git("config", "user.name", os.environ["GITLAB_USER_NAME"])
         url = url.split("@")[-1]
-        git("remote", "add", GITLAB_REMOTE, f"https://oauth2:{access_token}@{url}")
+        # FIXME: it would be nice to use set-url to simply replace origin
+        git(
+            "remote", "add", "-f", GITLAB_REMOTE, f"https://oauth2:{access_token}@{url}"
+        )
 
     def get_remote(self) -> str:
         url = os.environ["CI_REPOSITORY_URL"]
