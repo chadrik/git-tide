@@ -1140,7 +1140,7 @@ def test_get_remote_in_ci_environment(config, monkeypatch) -> None:
     with patch("tide.core.git") as mock_git:
         mock_git.return_value = None
 
-        assert GitlabRuntime(config).get_remote() == "gitlab_origin"
+        assert GitlabRuntime(config).get_remote() == "origin"
 
 
 @pytest.mark.unit

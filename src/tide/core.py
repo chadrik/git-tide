@@ -30,7 +30,7 @@ TOOL_NAME = "tide"
 ENVVAR_PREFIX = TOOL_NAME.upper()
 PROMOTION_BASE_MSG = "promotion base"
 HERE = os.path.dirname(__file__)
-GITLAB_REMOTE = "gitlab_origin"
+GITLAB_REMOTE = "origin"
 
 # FIXME: add these to config file
 HOTFIX_MESSAGE = "auto-hotfix into {upstream_branch}: {message}"
@@ -291,10 +291,7 @@ class GitlabRuntime(Runtime):
         git("config", "user.email", os.environ["GITLAB_USER_EMAIL"])
         git("config", "user.name", os.environ["GITLAB_USER_NAME"])
         url = url.split("@")[-1]
-        # FIXME: it would be nice to use set-url to simply replace origin
-        git(
-            "remote", "add", "-f", GITLAB_REMOTE, f"https://oauth2:{access_token}@{url}"
-        )
+        git("remote", "set-url", GITLAB_REMOTE, f"https://oauth2:{access_token}@{url}")
 
     def get_remote(self) -> str:
         url = os.environ["CI_REPOSITORY_URL"]
