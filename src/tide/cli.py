@@ -25,7 +25,7 @@ from .core import (
     ENVVAR_PREFIX,
     HOTFIX_MESSAGE,
 )
-from .gitutils import git, checkout
+from .gitutils import git, checkout, current_rev
 
 CONFIG: Config
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
@@ -204,14 +204,14 @@ def autotag(annotation: str, base_rev: str | None, projects: list[str]) -> None:
             # https://stackoverflow.com/questions/28237043/what-is-the-resolution-of-gits-commit-date-or-author-date-timestamps
             time.sleep(1.1)
 
-            click.echo(f"Creating new tag: {tag} on branch: {branch} {time.time()}")
+            click.echo(f"Creating new tag: {tag} on branch: {branch}")
             git("tag", "-a", tag, "-m", annotation)
 
             # FIXME: we may want to push all tags at once
             click.echo(f"Pushing {tag} to remote")
             backend.push(remote, tag)
     else:
-        click.echo("No tags generated!", err=True)
+        click.echo("No projects were modified and no tags generated!", err=True)
 
 
 @cli.command()
@@ -237,29 +237,37 @@ def hotfix() -> None:
     if match:
         message = match.groups()[0]
 
-    git("checkout", "-B", f"{branch}_temp")
-
-    # Fetch the upstream branch
-    git("fetch", remote, upstream_branch)
-
-    checkout(remote, upstream_branch, create=True)
-
-    msg = HOTFIX_MESSAGE.format(upstream_branch=upstream_branch, message=message)
-    click.echo(msg)
+    tmp_branch = f"{branch}_temp"
+    git("checkout", "-B", tmp_branch)
+    click.echo(f"Branch {branch} at {current_rev()}")
 
     try:
-        git("merge", f"{branch}_temp", "-m", msg)
-    except subprocess.CalledProcessError:
-        click.echo("Conflicts:", err=True)
-        git("diff", "--name-only", "--diff-filter=U")
-        raise
+        # Fetch the upstream branch
+        git("fetch", remote, upstream_branch)
 
-    # this will trigger a full pipeline for upstream_branch, and potentially another auto-merge
-    click.echo(f"Pushing {upstream_branch} to {remote}")
-    variables = {
-        f"{ENVVAR_PREFIX}_AUTOTAG_ANNOTATION": msg,
-    }
-    get_backend().push(remote, upstream_branch, variables=variables)
+        checkout(remote, upstream_branch, create=True)
+        # we pull in case the fetch depth is too low
+        git("pull")
+        click.echo(f"Branch {upstream_branch} at {current_rev()}")
+
+        msg = HOTFIX_MESSAGE.format(upstream_branch=upstream_branch, message=message)
+        click.echo(msg)
+
+        try:
+            git("merge", f"{branch}_temp", "-m", msg)
+        except subprocess.CalledProcessError:
+            click.echo("Conflicts:", err=True)
+            git("diff", "--name-only", "--diff-filter=U")
+            raise
+
+        # this will trigger a full pipeline for upstream_branch, and potentially another auto-merge
+        click.echo(f"Pushing {upstream_branch} to {remote}")
+        variables = {
+            f"{ENVVAR_PREFIX}_AUTOTAG_ANNOTATION": msg,
+        }
+        get_backend().push(remote, upstream_branch, variables=variables)
+    finally:
+        git("branch", "--delete", tmp_branch)
 
 
 @cli.command()
