@@ -691,8 +691,10 @@ def get_next_version(
 def get_projects() -> list[tuple[Path, str]]:
     """Get the list of projects within the repo.
 
-    A project is a folder with a pyproject.toml file with a `tool.tide` section
-    and a `tool.tide.project`.
+    A project is a folder with a pyproject.toml file with a `[project].name`
+    value or a `[tool.tide].project` value.
+
+    A project can opt-out by setting `[tool.tide].manged_project = false`
     """
     results = []
     repo = GitRepo(".")
@@ -700,11 +702,20 @@ def get_projects() -> list[tuple[Path, str]]:
         with open(path, "rb") as f:
             data = tomllib.load(f)
             try:
-                name = data["tool"][TOOL_NAME]["project"]
+                name = data["project"]["name"]
+            except KeyError:
+                try:
+                    name = data["tool"][TOOL_NAME]["project"]
+                except KeyError:
+                    continue
+
+            try:
+                if not data["tool"][TOOL_NAME]["manged_project"]:
+                    continue
             except KeyError:
                 pass
-            else:
-                results.append((Path(path).parent, name))
+
+            results.append((Path(path).parent, name))
     return sorted(results)
 
 
