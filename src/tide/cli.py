@@ -163,7 +163,18 @@ def init(
     metavar="SHA",
     help="The Git revision to compare against when identifying changed files.",
 )
-def autotag(annotation: str, base_rev: str | None) -> None:
+@click.option(
+    "--project",
+    "-p",
+    "projects",
+    multiple=True,
+    metavar="PROJECT",
+    help="The name of a modified tide project which should be tagged. "
+    "If unset, will be automatically determined by looking for changed "
+    "files in folders with valid pyproject.toml files. "
+    "(those with a `[project].name` value)",
+)
+def autotag(annotation: str, base_rev: str | None, projects: list[str]) -> None:
     """
     Tag the current branch with a new version number and push the tag to the remote repository.
     """
@@ -176,9 +187,13 @@ def autotag(annotation: str, base_rev: str | None) -> None:
     if not base_rev:
         base_rev = runtime.get_base_rev()
 
-    projects = get_modified_projects(base_rev, verbose=CONFIG.verbose)
     if projects:
-        for project_folder, project_name in projects:
+        path_mapping = {name: path for path, name in get_projects()}
+        projects_and_paths = [(path_mapping[name] for name in sorted(projects))]
+    else:
+        projects_and_paths = get_modified_projects(base_rev, verbose=CONFIG.verbose)
+    if projects_and_paths:
+        for project_folder, project_name in projects_and_paths:
             # Auto-tag
             tag = get_next_version(
                 CONFIG, branch, project_name=project_name, remote=remote, as_tag=True
@@ -288,14 +303,6 @@ def projects(modified: bool) -> None:
 
 @cli.command
 @click.option(
-    "--path",
-    default=".",
-    type=click.Path(exists=True, file_okay=False),
-    show_default=True,
-    help="Folder within the repository. A pyproject.toml should reside in the "
-    "specified directory",
-)
-@click.option(
     "--branch",
     default=None,
     help=(
@@ -311,22 +318,45 @@ def projects(modified: bool) -> None:
 )
 @click.option("--next", "-n", is_flag=True, default=False)
 @click.option("--as-tag", "-t", is_flag=True, default=False)
+@click.option(
+    "--project",
+    "-p",
+    "project_name",
+    metavar="PROJECT",
+    help="The name of a modified tide project to operate on. "
+    "If unset, the project will be looked up from the current directory. "
+    "(those with a `[project].name` value)",
+)
+@click.option(
+    "--path",
+    default=".",
+    type=click.Path(exists=True, file_okay=False),
+    show_default=True,
+    help="Folder within the repository. A pyproject.toml should reside in the "
+    "specified directory",
+)
 def version(
-    path: str, branch: str | None, remote: str, next: bool, as_tag: bool
+    branch: str | None,
+    remote: str,
+    next: bool,
+    as_tag: bool,
+    project_name: str | None,
+    path: str,
 ) -> None:
     """
     Get the project version
     """
-    projects = dict(get_projects())
-    folder = Path(path)
-    try:
-        project_name = projects[folder]
-    except KeyError:
-        raise click.ClickException(
-            f"There is not a project at path={folder}. "
-            "Ensure there is a pyproject.toml file with a [tool.tide] section "
-            "and a `project` entry"
-        )
+    if project_name is None:
+        projects = dict(get_projects())
+        folder = Path(path)
+        try:
+            project_name = projects[folder]
+        except KeyError:
+            raise click.ClickException(
+                f"There is not a project at path={folder}. "
+                "Ensure there is a pyproject.toml file with a [tool.tide] section "
+                "and a `project` entry, or a [project] section with a `name` entry."
+            )
 
     if next:
         if branch is None:
