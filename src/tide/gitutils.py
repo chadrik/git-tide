@@ -29,6 +29,13 @@ GLOB_TO_REGEX_REG = re.compile(
     r"({})".format("|".join(re.escape(f) for f, r in GLOB_TO_REGEX))
 )
 
+_verbose: bool = False
+
+
+def set_git_verbose(enabled: bool = True) -> None:
+    global _verbose
+    _verbose = enabled
+
 
 def join(remote: str | None, branch: str) -> str:
     """
@@ -73,8 +80,8 @@ def git(
         subprocess.CalledProcessError: If the git command fails.
     """
     cmd = ["git"] + [str(arg).strip() for arg in args]
-    # if CONFIG.verbose:
-    #     click.echo(cmd)
+    if _verbose:
+        print(cmd)
     if capture:
         output = subprocess.run(
             cmd,
@@ -164,6 +171,23 @@ def current_rev() -> str:
     Get the SHA for the current git revision.
     """
     return git("rev-parse", "HEAD", capture=True)
+
+
+def print_git_graph(max_count: int | None = None) -> None:
+    """
+    Prints the git graph in color, for debugging purposes
+    """
+    args = [
+        "log",
+        "--graph",
+        "--abbrev-commit",
+        "--oneline",
+        "--all",
+        "--decorate",
+    ]
+    if max_count:
+        args.append(f"-n={max_count}")
+    git(*args)
 
 
 def branch_exists(branch: str) -> bool:

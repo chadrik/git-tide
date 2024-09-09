@@ -35,6 +35,7 @@ from tide.gitutils import (
     current_rev,
     git,
     join,
+    print_git_graph,
 )
 
 from tide.core import (
@@ -425,20 +426,6 @@ def git_graph() -> str:
         "--all",
         "--decorate",
         capture=True,
-    )
-
-
-def print_git_graph() -> None:
-    """
-    Prints the git graph in color, for debugging purposes
-    """
-    git(
-        "log",
-        "--graph",
-        "--abbrev-commit",
-        "--oneline",
-        "--all",
-        "--decorate",
     )
 
 

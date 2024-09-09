@@ -25,7 +25,7 @@ from .core import (
     ENVVAR_PREFIX,
     HOTFIX_MESSAGE,
 )
-from .gitutils import git, checkout, current_rev
+from .gitutils import git, checkout, current_rev, print_git_graph, set_git_verbose
 
 CONFIG: Config
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
@@ -37,6 +37,7 @@ def set_config(config: Config) -> Config:
     """
     global CONFIG
     CONFIG = config
+    set_git_verbose(config.verbose)
     return config
 
 
@@ -246,8 +247,7 @@ def hotfix() -> None:
         git("fetch", remote, upstream_branch)
 
         checkout(remote, upstream_branch, create=True)
-        # we pull in case the fetch depth is too low
-        git("pull")
+
         click.echo(f"Branch {upstream_branch} at {current_rev()}")
 
         msg = HOTFIX_MESSAGE.format(upstream_branch=upstream_branch, message=message)
@@ -258,15 +258,24 @@ def hotfix() -> None:
         except subprocess.CalledProcessError:
             click.echo("Conflicts:", err=True)
             git("diff", "--name-only", "--diff-filter=U")
-            raise
+            raise click.ClickException("Encountered conflicts during merge")
 
         # this will trigger a full pipeline for upstream_branch, and potentially another auto-merge
         click.echo(f"Pushing {upstream_branch} to {remote}")
         variables = {
             f"{ENVVAR_PREFIX}_AUTOTAG_ANNOTATION": msg,
         }
-        get_backend().push(remote, upstream_branch, variables=variables)
+        backend = get_backend()
+        try:
+            backend.push(remote, upstream_branch, variables=variables)
+        except subprocess.CalledProcessError as err:
+            click.echo(err)
+            git("remote", "-v")
+            print_git_graph(max_count=50)
+            raise click.ClickException("Failed to push changes")
     finally:
+        # Cleanup
+        checkout(None, branch)
         git("branch", "--delete", tmp_branch)
 
 
