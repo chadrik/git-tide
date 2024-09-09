@@ -190,7 +190,7 @@ def autotag(annotation: str, base_rev: str | None, projects: list[str]) -> None:
 
     if projects:
         path_mapping = {name: path for path, name in get_projects()}
-        projects_and_paths = [(path_mapping[name] for name in sorted(projects))]
+        projects_and_paths = [(path_mapping[name], name) for name in sorted(projects)]
     else:
         projects_and_paths = get_modified_projects(base_rev, verbose=CONFIG.verbose)
     if projects_and_paths:
