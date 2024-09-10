@@ -254,10 +254,10 @@ def hotfix() -> None:
 
         rev = checkout_remote_branch(remote, upstream_branch)
 
-        click.echo(f"Branch {upstream_branch} at {rev}")
+        click.echo(f"Branch {upstream_branch} at {rev}", err=True)
 
         msg = HOTFIX_MESSAGE.format(upstream_branch=upstream_branch, message=message)
-        click.echo(msg)
+        click.echo(msg, err=True)
 
         try:
             git("merge", f"{branch}_temp", "-m", msg)
@@ -267,7 +267,7 @@ def hotfix() -> None:
             raise click.ClickException("Encountered conflicts during merge")
 
         # this will trigger a full pipeline for upstream_branch, and potentially another auto-merge
-        click.echo(f"Pushing {upstream_branch} to {remote}")
+        click.echo(f"Pushing {upstream_branch} to {remote}", err=True)
         variables = {
             f"{ENVVAR_PREFIX}_AUTOTAG_ANNOTATION": msg,
         }
@@ -275,7 +275,7 @@ def hotfix() -> None:
         try:
             backend.push(remote, upstream_branch, variables=variables)
         except subprocess.CalledProcessError as err:
-            click.echo(err)
+            click.echo(err, err=True)
             git("remote", "-v")
             print_git_graph(max_count=50)
             raise click.ClickException("Failed to push changes")

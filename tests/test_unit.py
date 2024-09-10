@@ -250,7 +250,7 @@ def setup_git_repo(
     index = lines.index("[tool.tide]")
     pyproject = tmp_path.joinpath("pyproject.toml")
     lines = lines[: index + 1]
-    lines.append("manged_project = false")
+    lines.append("managed_project = false")
     lines.append('tag_format = "$project-$version"')
     for release_id, branch in branches.items():
         lines.append(f'branches.{release_id} = "{branch}"')

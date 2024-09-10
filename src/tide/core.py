@@ -381,9 +381,11 @@ class GitlabBackend(Backend):
                         "masked": True,
                     }
                 )
-                click.echo("Created ACCESS_TOKEN project variable")
+                click.echo("Created ACCESS_TOKEN project variable", err=True)
             else:
-                click.echo("ACCESS_TOKEN project variable already exists. Skipping")
+                click.echo(
+                    "ACCESS_TOKEN project variable already exists. Skipping", err=True
+                )
         else:
             # FIXME: validate that ACCESS_TOKEN has been set at the project or group level
             pass
@@ -403,7 +405,7 @@ class GitlabBackend(Backend):
             else:
                 p_branch.allow_force_push = True
                 p_branch.save()
-        click.echo("Setup protected branches")
+        click.echo("Setup protected branches", err=True)
 
         default_branch = self.config.most_experimental_branch() or self.config.stable
         gl.projects.update(project.id, {"default_branch": default_branch})
@@ -421,7 +423,8 @@ class GitlabBackend(Backend):
             )
             schedule.variables.create({"key": "SCHEDULED_JOB_NAME", "value": "promote"})
             click.echo(
-                f"Created '{self.PROMOTION_SCHEDULED_JOB_NAME}' scheduled job, in non-active state"
+                f"Created '{self.PROMOTION_SCHEDULED_JOB_NAME}' scheduled job, in non-active state",
+                err=True,
             )
 
 
@@ -471,7 +474,7 @@ class TestGitlabBackend(GitlabBackend):
         # which are not supported by local git repos.
         if variables:
             json_file = os.path.join(os.environ["CI_REPOSITORY_URL"], "push-opts.json")
-            click.echo(f"Writing local output to {json_file}")
+            click.echo(f"Writing local output to {json_file}", err=True)
             if os.path.exists(json_file):
                 os.remove(json_file)
 
@@ -521,7 +524,7 @@ def is_pending_bump(
 
     matcher = provider._tag_format_matcher()
     if config.verbose:
-        click.echo(f"Found promotion base rev: {promotion_rev}")
+        click.echo(f"Found promotion base rev: {promotion_rev}", err=True)
     # List any tags for this project folder between this branch and the promotion note
     all_tags = get_tags(end_rev=promotion_rev)
     tags = [t for t in all_tags if matcher(t)]
@@ -535,7 +538,7 @@ def get_promotion_marker(remote: str | None = None) -> str | None:
     Args:
         remote: The remote repository name
     """
-    git("fetch", remote if remote else "--all", "refs/notes/*:refs/notes/*")
+    git("fetch", remote if remote else "--all", "refs/notes/*:refs/notes/*", quiet=True)
     output = git("log", "--format=%H %N", "-n20", capture=True)
     for line in output.splitlines():
         line = line.strip()
@@ -702,7 +705,7 @@ def get_projects() -> list[tuple[Path, str]]:
     A project is a folder with a pyproject.toml file with a `[project].name`
     value or a `[tool.tide].project` value.
 
-    A project can opt-out by setting `[tool.tide].manged_project = false`
+    A project can opt-out by setting `[tool.tide].managed_project = false`
     """
     results = []
     repo = GitRepo(".")
@@ -718,7 +721,7 @@ def get_projects() -> list[tuple[Path, str]]:
                     continue
 
             try:
-                if not data["tool"][TOOL_NAME]["manged_project"]:
+                if not data["tool"][TOOL_NAME]["managed_project"]:
                     continue
             except KeyError:
                 pass

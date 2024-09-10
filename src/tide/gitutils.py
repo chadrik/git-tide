@@ -4,7 +4,7 @@ import fnmatch
 import subprocess
 import re
 import os.path
-
+import sys
 
 from functools import lru_cache
 from typing import overload, Literal, Iterable, Match, Pattern, Iterator
@@ -81,7 +81,7 @@ def git(
     """
     cmd = ["git"] + [str(arg).strip() for arg in args]
     if _verbose:
-        print(cmd)
+        print(cmd, file=sys.stderr)
     if capture:
         output = subprocess.run(
             cmd,
@@ -244,7 +244,7 @@ def regexes_to_regex(patterns: Iterable[str]) -> Pattern | None:
     try:
         return re.compile(pattern)
     except re.error:
-        print(pattern)
+        print(pattern, file=sys.stderr)
         raise
 
 
