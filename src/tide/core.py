@@ -18,7 +18,15 @@ from abc import abstractmethod
 from enum import Enum
 from typing import TYPE_CHECKING, cast
 
-from .gitutils import git, checkout, get_tags, branch_exists, join, current_rev, GitRepo
+from .gitutils import (
+    git,
+    checkout_remote_branch,
+    get_tags,
+    branch_exists,
+    join,
+    current_rev,
+    GitRepo,
+)
 
 if TYPE_CHECKING:
     import gitlab.v4.objects
@@ -783,7 +791,7 @@ def promote(config: Config, backend: Backend, runtime: Runtime) -> None:
         click.echo(f"Fetching {remote}/{branch}")
         git("fetch", remote, branch)
 
-        base_rev = checkout(remote, branch, create=True)
+        base_rev = checkout_remote_branch(remote, branch)
 
         if upstream_branch:
             git("fetch", remote, upstream_branch)

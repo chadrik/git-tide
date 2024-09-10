@@ -1,6 +1,6 @@
 [project]
 name = "git-tide"
-version = "0.1.9"
+version = "0.1.10"
 description = "CLI for automated gitflow-style branching"
 authors = [
     {name="Chad Dombrova"},

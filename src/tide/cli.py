@@ -25,7 +25,13 @@ from .core import (
     ENVVAR_PREFIX,
     HOTFIX_MESSAGE,
 )
-from .gitutils import git, checkout, current_rev, print_git_graph, set_git_verbose
+from .gitutils import (
+    git,
+    checkout_remote_branch,
+    current_rev,
+    print_git_graph,
+    set_git_verbose,
+)
 
 CONFIG: Config
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
@@ -246,9 +252,9 @@ def hotfix() -> None:
         # Fetch the upstream branch
         git("fetch", remote, upstream_branch)
 
-        checkout(remote, upstream_branch, create=True)
+        rev = checkout_remote_branch(remote, upstream_branch)
 
-        click.echo(f"Branch {upstream_branch} at {current_rev()}")
+        click.echo(f"Branch {upstream_branch} at {rev}")
 
         msg = HOTFIX_MESSAGE.format(upstream_branch=upstream_branch, message=message)
         click.echo(msg)
@@ -275,7 +281,7 @@ def hotfix() -> None:
             raise click.ClickException("Failed to push changes")
     finally:
         # Cleanup
-        checkout(None, branch)
+        git("checkout", branch)
         git("branch", "--delete", tmp_branch)
 
 

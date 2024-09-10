@@ -139,30 +139,17 @@ def get_branches() -> list[str]:
     return [x.split()[-1] for x in output.splitlines()]
 
 
-def checkout(remote: str | None, branch: str, create: bool = False) -> str:
+def checkout_remote_branch(remote: str, branch: str) -> str:
     """
-    Check out a specific branch, optionally creating it if it doesn't exist.
+    Check out a specific remote branch, creating it if it doesn't exist.
 
     Args:
         remote: The remote repository name
         branch: The branch name to check out.
-        create: Whether to create the branch if it does not exist (default is False).
     """
-    args = ["checkout"]
-
-    if remote:
-        if create and not branch_exists(branch):
-            args += ["--track", join(remote, branch)]
-        else:
-            args = ["branch", f"--set-upstream-to={join(remote, branch)}"]
-    else:
-        if create and not branch_exists(branch):
-            # if CONFIG.verbose:
-            #     click.echo(f"Creating branch {branch}")
-            args += ["-b", branch]
-        else:
-            args += [branch]
-    git(*args)
+    if branch_exists(branch):
+        git("branch", "--delete", branch)
+    git("checkout", "--track", join(remote, branch))
     return get_latest_commit(None, branch)
 
 

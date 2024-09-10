@@ -29,7 +29,7 @@ from typing import Generator, Literal, overload
 import click
 
 from tide.gitutils import (
-    checkout,
+    checkout_remote_branch,
     get_branches,
     get_latest_commit,
     current_rev,
@@ -964,65 +964,18 @@ def test_get_upstream_branch_with_empty_branches(config, monkeypatch) -> None:
 
 
 @pytest.mark.unit
-def test_checkout_existing_branch() -> None:
-    remote = "origin"
-    branch = "main"
-
-    with patch("tide.gitutils.git") as mock_git:
-        checkout(remote, branch)
-
-    mock_git.assert_has_calls(
-        [
-            call("branch", f"--set-upstream-to={remote}/{branch}"),
-            call("rev-parse", branch, capture=True),
-        ]
-    )
-
-
-@pytest.mark.unit
 def test_checkout_new_branch() -> None:
     remote = "origin"
     branch = "feature/123"
-    create = True
 
     with patch("tide.gitutils.git") as mock_git:
-        checkout(remote, branch, create)
+        checkout_remote_branch(remote, branch)
 
     mock_git.assert_has_calls(
         [
             call("rev-parse", "--verify", branch, quiet=True),
-            call("branch", f"--set-upstream-to={remote}/{branch}"),
-            call("rev-parse", branch, capture=True),
-        ]
-    )
-
-
-@pytest.mark.unit
-def test_checkout_local_branch() -> None:
-    remote = None
-    branch = "bugfix/456"
-
-    with patch("tide.gitutils.git") as mock_git:
-        checkout(remote, branch)
-
-    mock_git.assert_has_calls(
-        [call("checkout", branch), call("rev-parse", branch, capture=True)]
-    )
-
-
-@pytest.mark.unit
-def test_checkout_local_new_branch() -> None:
-    remote = None
-    branch = "feature/789"
-    create = True
-
-    with patch("tide.gitutils.git") as mock_git:
-        checkout(remote, branch, create)
-
-    mock_git.assert_has_calls(
-        [
-            call("rev-parse", "--verify", branch, quiet=True),
-            call("checkout", branch),
+            call("branch", "--delete", branch),
+            call("checkout", "--track", f"{remote}/{branch}"),
             call("rev-parse", branch, capture=True),
         ]
     )
@@ -1036,7 +989,7 @@ def test_checkout_git_command_failure() -> None:
     with patch("tide.gitutils.git") as mock_git:
         mock_git.side_effect = subprocess.CalledProcessError(1, "git")
         with pytest.raises(subprocess.CalledProcessError):
-            checkout(remote, branch)
+            checkout_remote_branch(remote, branch)
 
 
 @pytest.mark.unit
