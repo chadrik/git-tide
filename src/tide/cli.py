@@ -181,7 +181,10 @@ def init(
     "files in folders with valid pyproject.toml files. "
     "(those with a `[project].name` value)",
 )
-def autotag(annotation: str, base_rev: str | None, projects: list[str]) -> None:
+@click.option("--dry-run", is_flag=True, default=False)
+def autotag(
+    annotation: str, base_rev: str | None, projects: list[str], dry_run: bool
+) -> None:
     """
     Tag the current branch with a new version number and push the tag to the remote repository.
     """
@@ -211,12 +214,19 @@ def autotag(annotation: str, base_rev: str | None, projects: list[str]) -> None:
             # https://stackoverflow.com/questions/28237043/what-is-the-resolution-of-gits-commit-date-or-author-date-timestamps
             time.sleep(1.1)
 
-            click.echo(f"Creating new tag: {tag} on branch: {branch}")
-            git("tag", "-a", tag, "-m", annotation)
+            click.echo(
+                f"Creating new tag '{tag}' on branch {branch}"
+                + (" (dry_run=True)" if dry_run else "")
+            )
+            if not dry_run:
+                git("tag", "-a", tag, "-m", annotation)
 
             # FIXME: we may want to push all tags at once
-            click.echo(f"Pushing {tag} to remote")
-            backend.push(remote, tag)
+            click.echo(
+                f"Pushing '{tag}' to {remote}" + (" (dry_run=True)" if dry_run else "")
+            )
+            if not dry_run:
+                backend.push(remote, tag)
     else:
         click.echo("No projects were modified and no tags generated!", err=True)
 

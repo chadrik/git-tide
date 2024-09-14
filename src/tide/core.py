@@ -16,7 +16,7 @@ from functools import lru_cache
 from urllib.parse import urlparse, urlunparse
 from abc import abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Iterable, cast
 
 from .gitutils import (
     git,
@@ -751,18 +751,38 @@ def get_modified_projects(
                 click.echo(f" {path}")
         else:
             click.echo(f"No modified files between {base_rev} and HEAD", err=True)
+    return get_projects_from_files([Path(x) for x in all_files])
 
+
+def group_files_by_projects(
+    files: Iterable[Path], project_dirs: Iterable[Path] | None = None
+) -> dict[Path, list[Path]]:
+    """Given an iterable of files and project directories, return a mapping from
+    project directories to files made relative to those directories.
+    """
+    from collections import defaultdict
+
+    if project_dirs is None:
+        dict(get_projects()).keys()
     # find the deepest project that the file belongs to
-    projects = dict(get_projects())
-    project_dirs = list(reversed(projects))
+    project_dirs = list(reversed(sorted(project_dirs)))
 
-    results = set()
-    for changed_file in all_files:
+    results: dict[Path, list[Path]] = defaultdict(list)
+    for changed_file in files:
+        parents = changed_file.parents
         for project_dir in project_dirs:
-            if project_dir in Path(changed_file).parents:
-                results.add(project_dir)
+            if project_dir in parents:
+                results[project_dir].append(changed_file.relative_to(project_dir))
+                break
+    return dict(results)
 
-    return [(project_dir, projects[project_dir]) for project_dir in sorted(results)]
+
+def get_projects_from_files(files: Iterable[Path]) -> list[tuple[Path, str]]:
+    """Given an iterable of files, return a list of (project path, package name) tuples."""
+    projects: list[tuple[Path, str]] = get_projects()
+    project_map = dict(projects)
+    results = group_files_by_projects(files, project_dirs=project_map)
+    return [(project_dir, project_map[project_dir]) for project_dir in sorted(results)]
 
 
 def promote(config: Config, backend: Backend, runtime: Runtime) -> None:
