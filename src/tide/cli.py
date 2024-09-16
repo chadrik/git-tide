@@ -256,7 +256,8 @@ def hotfix() -> None:
 
     tmp_branch = f"{branch}_temp"
     git("checkout", "-B", tmp_branch)
-    click.echo(f"Branch {branch} at {current_rev()}")
+    start_rev = current_rev()
+    click.echo(f"Branch {branch} at {start_rev}")
 
     try:
         # Fetch the upstream branch
@@ -291,8 +292,8 @@ def hotfix() -> None:
             raise click.ClickException("Failed to push changes")
     finally:
         # Cleanup
-        git("checkout", branch)
-        git("branch", "--delete", tmp_branch)
+        git("checkout", start_rev, quiet=True)
+        git("branch", "--delete", tmp_branch, quiet=True)
 
 
 @cli.command()
