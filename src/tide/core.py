@@ -763,7 +763,7 @@ def group_files_by_projects(
     from collections import defaultdict
 
     if project_dirs is None:
-        dict(get_projects()).keys()
+        project_dirs = dict(get_projects()).keys()
     # find the deepest project that the file belongs to
     project_dirs = list(reversed(sorted(project_dirs)))
 
