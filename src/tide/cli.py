@@ -206,8 +206,19 @@ def autotag(
         for project_folder, project_name in projects_and_paths:
             # Auto-tag
             tag = get_next_version(
-                CONFIG, branch, project_name=project_name, remote=remote, as_tag=True
+                CONFIG,
+                branch,
+                project_name=project_name,
+                remote=remote,
+                as_tag=True,
+                add_missing_promote_marker=True,
             )
+            # tag can be None if a branch has not yet received its first seed promotion.
+            # for example: prior to beta being promoted to rc, there will not be any
+            # rc tags, and we don't want to generate one until the first rc release
+            # comes into existence.
+            if tag is None:
+                continue
 
             # NOTE: this delay is necessary to create stable sorting of tags
             # because git's time resolution is 1s (same as unix timestamp).

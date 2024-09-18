@@ -115,10 +115,12 @@ def load_config(path: str | None = None, verbose: bool = False) -> Config:
 
 @dataclass
 class Config:
+    # mapping from id to branch name
     stable: str = "master"
     rc: str | None = None
     beta: str | None = None
     alpha: str | None = None
+
     # branches in order from most-experimental to stable
     branches: list[str] = field(default_factory=list)
     # branch name to pre-release name (alpha, beta, rc). None for stable.
@@ -501,6 +503,7 @@ def is_pending_bump(
     provider: commitizen.providers.ScmProvider,
     branch: str,
     remote: str | None = None,
+    add_missing_promote_marker: bool = False,
 ) -> bool:
     """
     Return whether the given branch and folder combination are awaiting a minor bump.
@@ -515,16 +518,22 @@ def is_pending_bump(
     if branch != config.most_experimental_branch():
         return False
 
-    # Find the closest promotion note to the current branch
     promotion_rev = get_promotion_marker(remote)
     if promotion_rev is None:
         if config.verbose:
             click.echo("No promote marker found", err=True)
+        if add_missing_promote_marker:
+            if remote is None:
+                raise ValueError(
+                    "Must provide remote when setting add_missing_promote_marker=True"
+                )
+            set_promotion_marker(remote, current_rev())
         return True
+    else:
+        if config.verbose:
+            click.echo(f"Found promotion base rev: {promotion_rev}", err=True)
 
     matcher = provider._tag_format_matcher()
-    if config.verbose:
-        click.echo(f"Found promotion base rev: {promotion_rev}", err=True)
     # List any tags for this project folder between this branch and the promotion note
     all_tags = get_tags(end_rev=promotion_rev)
     tags = [t for t in all_tags if matcher(t)]
@@ -634,7 +643,8 @@ def get_next_version(
     remote: str | None = None,
     project_name: str | None = None,
     as_tag: bool = False,
-) -> str:
+    add_missing_promote_marker: bool = False,
+) -> str | None:
     """
     Return the next version for a given branch based on the latest changes.
 
@@ -643,7 +653,9 @@ def get_next_version(
         branch: The name of the branch for which to generate the tag.
         project_name: The name of the project, used for tag formatting.
         as_tag: Whether to format the version based on tool.tide.tag_format
-
+        add_missing_promote_marker: if this is called prior to the first promotion
+          of branches, setting this to True will cause a promotion marker to
+          be set so that subsequent calls will not cause a minor version bump.
     Returns:
         The next version or tag to be created
     """
@@ -673,18 +685,35 @@ def get_next_version(
     scheme = get_version_scheme(cz_config)
     current_version = scheme(provider.get_version())
 
+    if release_id != ReleaseID.stable:
+        prerelease = release_id.value
+        if (
+            not current_version.prerelease
+            and branch != config.most_experimental_branch()
+        ):
+            print(
+                f"Current version {current_version} {current_version.prerelease} {prerelease}"
+            )
+            return None
+    else:
+        prerelease = None
+
+    # Find the closest promotion note to the current branch
+    pending_bump = is_pending_bump(
+        config,
+        provider,
+        branch,
+        remote,
+        add_missing_promote_marker=add_missing_promote_marker,
+    )
+
     # Only apply minor increment the most experimental branch
-    if is_pending_bump(config, provider, branch, remote=remote):
+    if pending_bump:
         increment: Increment = "MINOR"
         exact_increment = True
     else:
         increment = "PATCH"
         exact_increment = False
-
-    if release_id != ReleaseID.stable:
-        prerelease = release_id.value
-    else:
-        prerelease = None
 
     new_version = current_version.bump(
         increment,
