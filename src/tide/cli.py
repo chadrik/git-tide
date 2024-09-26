@@ -4,7 +4,6 @@ import time
 import os
 import subprocess
 import re
-from pathlib import Path
 
 from .core import (
     is_url,
@@ -391,17 +390,17 @@ def version(
     """
     Get the project version
     """
-    if project_name is None:
-        projects = dict(get_projects())
-        folder = Path(path)
-        try:
-            project_name = projects[folder]
-        except KeyError:
-            raise click.ClickException(
-                f"There is not a project at path={folder}. "
-                "Ensure there is a pyproject.toml file with a [tool.tide] section "
-                "and a `project` entry, or a [project] section with a `name` entry."
-            )
+    # if project_name is None:
+    #     projects = dict(get_projects())
+    #     folder = Path(path)
+    #     try:
+    #         project_name = projects[folder]
+    #     except KeyError:
+    #         raise click.ClickException(
+    #             f"There is not a project at '{folder}'. "
+    #             "Ensure there is a pyproject.toml file with a [tool.tide] section "
+    #             "and a `project` entry, or a [project] section with a `name` entry."
+    #         )
 
     if next:
         if branch is None:

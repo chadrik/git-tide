@@ -19,21 +19,13 @@ from tide.gitutils import (
 
 from tide.core import (
     get_modified_projects,
-    load_config,
-    Config,
 )
-from tide.cli import set_config
 
 
 HERE = os.path.dirname(__file__)
 VERBOSE = os.environ.get("VERBOSE", "false").lower() in ("true", "1")
 
-
-@pytest.fixture
-def config() -> Config:
-    return set_config(
-        load_config(os.path.join(HERE, "..", "pyproject.toml"), verbose=VERBOSE)
-    )
+os.environ["TIDE_PATCH_CZ_RUN"] = "true"
 
 
 # @pytest.mark.unit

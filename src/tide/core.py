@@ -1,6 +1,7 @@
 from __future__ import absolute_import, print_function, annotations
 
 import os
+import shlex
 import subprocess
 import json
 
@@ -31,6 +32,7 @@ from .gitutils import (
 if TYPE_CHECKING:
     import gitlab.v4.objects
     import commitizen.providers
+    import commitizen.cmd
     import commitizen.config
 
 
@@ -46,6 +48,42 @@ PROMOTION_CYCLE_START_MESSAGE = "starting new {release_id} cycle."
 PROMOTION_MESSAGE = "promoting {upstream_branch} to {branch}!"
 
 cache = lru_cache(maxsize=None)
+
+
+def _patched_run(cmd: str, env=None) -> commitizen.cmd.Command:
+    import commitizen.cmd
+
+    process = subprocess.Popen(
+        shlex.split(cmd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.PIPE,
+        env=env,
+    )
+    stdout, stderr = process.communicate()
+    return_code = process.returncode
+    return commitizen.cmd.Command(
+        commitizen.cmd._try_decode(stdout),
+        commitizen.cmd._try_decode(stderr),
+        stdout,
+        stderr,
+        return_code,
+    )
+
+
+def _patch_cz_run():
+    """
+    commitizen.cmd.run uses shell=True, which can introduce inconsistency
+    based on user profiles, etc.
+    """
+    if os.environ.get("TIDE_PATCH_CZ_RUN", "0").lower() not in ["1", "true"]:
+        return
+
+    import commitizen.cmd
+
+    if commitizen.cmd.run is _patched_run:
+        return
+    commitizen.cmd.run = _patched_run
 
 
 class ReleaseID(str, Enum):
@@ -615,6 +653,8 @@ def get_current_version(
     from commitizen.version_schemes import get_version_scheme
     from commitizen import bump
 
+    _patch_cz_run()
+
     if project_name is None:
         if as_tag:
             raise ValueError(
@@ -662,6 +702,8 @@ def get_next_version(
     from commitizen.providers import ScmProvider
     from commitizen.version_schemes import get_version_scheme, Increment
     from commitizen import bump
+
+    _patch_cz_run()
 
     try:
         release_id = config.branch_to_release_id[branch]

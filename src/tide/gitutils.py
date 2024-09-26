@@ -7,8 +7,8 @@ import os.path
 import sys
 
 from functools import lru_cache
-from typing import overload, Literal, Iterable, Match, Pattern, Iterator
-
+from typing import overload, Iterable, Match, Pattern, Iterator
+from typing_extensions import Literal
 
 cache = lru_cache(maxsize=None)
 

@@ -93,7 +93,7 @@ def type_hints(session: nox.Session) -> None:
     session.run("mypy", *session.posargs)
 
 
-@nox.session(reuse_venv=True)
+@nox.session(reuse_venv=True, python=["3.8", "3.9", "3.10", "3.11"])
 def unit_tests(session: nox.Session) -> None:
     """
     Run the project's unit tests.

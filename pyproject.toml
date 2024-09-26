@@ -1,6 +1,6 @@
 [project]
 name = "git-tide"
-version = "0.1.13"
+version = "0.1.14"
 description = "CLI for automated gitflow-style branching"
 authors = [
     {name="Chad Dombrova"},
@@ -9,8 +9,9 @@ authors = [
 readme = "README.md"
 dependencies = [
     "commitizen ==3.16.0",
-    "tomli >=2.0.1 ; python_version <'3.11'",
-    "click ==8.1.7",
+    "tomli",
+    "click",
+    "typing-extensions",
 ]
 requires-python = ">=3.8"
 
@@ -20,6 +21,9 @@ Homepage = "https://github.com/chadrik/git-tide"
 [project.optional-dependencies]
 init = [
     "python-gitlab ==4.8.0",
+]
+test = [
+    "pytest",
 ]
 
 [project.scripts]
@@ -37,6 +41,7 @@ build-backend = "hatchling.build"
 
 
 [tool.mypy]
+python_version = "3.7"
 files = ["noxfile.py", "src"]
 ignore_missing_imports = true
 show_error_codes = true
