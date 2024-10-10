@@ -4,12 +4,14 @@ import time
 import os
 import subprocess
 import re
+from pathlib import Path
 
 from .core import (
     is_url,
     get_next_version,
     get_current_version,
     get_modified_projects,
+    get_project_name,
     get_projects,
     load_config,
     promote as _promote,
@@ -363,15 +365,6 @@ def projects(modified: bool) -> None:
 @click.option("--next", "-n", is_flag=True, default=False)
 @click.option("--as-tag", "-t", is_flag=True, default=False)
 @click.option(
-    "--project",
-    "-p",
-    "project_name",
-    metavar="PROJECT",
-    help="The name of a modified tide project to operate on. "
-    "If unset, the project will be looked up from the current directory. "
-    "(those with a `[project].name` value)",
-)
-@click.option(
     "--path",
     default=".",
     type=click.Path(exists=True, file_okay=False),
@@ -384,24 +377,18 @@ def version(
     remote: str,
     next: bool,
     as_tag: bool,
-    project_name: str | None,
     path: str,
 ) -> None:
     """
     Get the project version
     """
-    # if project_name is None:
-    #     projects = dict(get_projects())
-    #     folder = Path(path)
-    #     try:
-    #         project_name = projects[folder]
-    #     except KeyError:
-    #         raise click.ClickException(
-    #             f"There is not a project at '{folder}'. "
-    #             "Ensure there is a pyproject.toml file with a [tool.tide] section "
-    #             "and a `project` entry, or a [project] section with a `name` entry."
-    #         )
-
+    project_name = get_project_name(Path(path))
+    if project_name is None:
+        raise click.ClickException(
+            f"Could not determine the project name at {path}. "
+            "Ensure that the folder has a pyproject.toml file "
+            "with project.name or tool.tide.project defined"
+        )
     if next:
         if branch is None:
             runtime = get_runtime()

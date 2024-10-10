@@ -17,7 +17,7 @@ from functools import lru_cache
 from urllib.parse import urlparse, urlunparse
 from abc import abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING, Iterable, cast
+from typing import TYPE_CHECKING, Iterable, Mapping, cast
 
 from .gitutils import (
     git,
@@ -50,7 +50,9 @@ PROMOTION_MESSAGE = "promoting {upstream_branch} to {branch}!"
 cache = lru_cache(maxsize=None)
 
 
-def _patched_run(cmd: str, env=None) -> commitizen.cmd.Command:
+def _patched_run(
+    cmd: str, env: Mapping[str, str] | None = None
+) -> commitizen.cmd.Command:
     import commitizen.cmd
 
     process = subprocess.Popen(
@@ -71,7 +73,7 @@ def _patched_run(cmd: str, env=None) -> commitizen.cmd.Command:
     )
 
 
-def _patch_cz_run():
+def _patch_cz_run() -> None:
     """
     commitizen.cmd.run uses shell=True, which can introduce inconsistency
     based on user profiles, etc.
@@ -549,6 +551,9 @@ def is_pending_bump(
     Args:
         remote: The remote repository name
         branch: one of the registered gitflow branches
+        add_missing_promote_marker: if this is called prior to the first promotion
+          of branches, setting this to True will cause a promotion marker to
+          be set so that subsequent calls will not cause a minor version bump.
 
     Returns:
         whether it is pending or not
@@ -635,15 +640,13 @@ def _get_cz_config(tag_format: str, project_name: str) -> commitizen.config.Base
     return cz_config
 
 
-def get_current_version(
-    config: Config, project_name: str | None = None, as_tag: bool = False
-) -> str:
+def get_current_version(config: Config, project_name: str, as_tag: bool = False) -> str:
     """
     Return the current version.
 
     Args:
         project_name: The name of the project, used to look up the commitizen
-            configuration
+            configuration, and find matching tags
         as_tag: Whether to format the version based on tool.tide.tag_format
 
     Returns:
@@ -654,14 +657,6 @@ def get_current_version(
     from commitizen import bump
 
     _patch_cz_run()
-
-    if project_name is None:
-        if as_tag:
-            raise ValueError(
-                "If requesting version in tag format, you must " "provide project_name"
-            )
-        else:
-            project_name = "placeholder"
 
     cz_config = _get_cz_config(config.tag_format, project_name)
     provider = ScmProvider(cz_config)
@@ -680,8 +675,8 @@ def get_current_version(
 def get_next_version(
     config: Config,
     branch: str,
+    project_name: str,
     remote: str | None = None,
-    project_name: str | None = None,
     as_tag: bool = False,
     add_missing_promote_marker: bool = False,
 ) -> str | None:
@@ -691,7 +686,8 @@ def get_next_version(
     Args:
         remote: The remote repository name
         branch: The name of the branch for which to generate the tag.
-        project_name: The name of the project, used for tag formatting.
+        project_name: The name of the project, used to look up the commitizen
+            configuration, and find matching tags
         as_tag: Whether to format the version based on tool.tide.tag_format
         add_missing_promote_marker: if this is called prior to the first promotion
           of branches, setting this to True will cause a promotion marker to
@@ -712,14 +708,6 @@ def get_next_version(
             f"{branch} is not a valid release branch.  "
             f"Must be one of {', '.join(config.branches)}"
         )
-
-    if project_name is None:
-        if as_tag:
-            raise ValueError(
-                "If requesting version in tag format, you must " "provide project_name"
-            )
-        else:
-            project_name = "placeholder"
 
     cz_config = _get_cz_config(config.tag_format, project_name)
 
@@ -770,6 +758,32 @@ def get_next_version(
     )
 
 
+def get_project_name(pyproject: Path) -> str | None:
+    """
+    Return the name of the project at the given path.
+    """
+    if not pyproject.suffix == ".toml" and pyproject.is_dir():
+        pyproject = pyproject.joinpath("pyproject.toml")
+
+    name = None
+    with open(pyproject, "rb") as f:
+        data = tomllib.load(f)
+        try:
+            name = data["project"]["name"]
+        except KeyError:
+            try:
+                name = data["tool"][TOOL_NAME]["project"]
+            except KeyError:
+                return None
+
+        try:
+            if not data["tool"][TOOL_NAME]["managed_project"]:
+                return None
+        except KeyError:
+            pass
+    return name
+
+
 def get_projects() -> list[tuple[Path, str]]:
     """Get the list of projects within the repo.
 
@@ -781,23 +795,10 @@ def get_projects() -> list[tuple[Path, str]]:
     results = []
     repo = GitRepo(".")
     for path in repo.file_matches(include=("**/pyproject.toml",)):
-        with open(path, "rb") as f:
-            data = tomllib.load(f)
-            try:
-                name = data["project"]["name"]
-            except KeyError:
-                try:
-                    name = data["tool"][TOOL_NAME]["project"]
-                except KeyError:
-                    continue
-
-            try:
-                if not data["tool"][TOOL_NAME]["managed_project"]:
-                    continue
-            except KeyError:
-                pass
-
-            results.append((Path(path).parent, name))
+        pyproject = Path(path)
+        project_name = get_project_name(pyproject)
+        if project_name is not None:
+            results.append((pyproject.parent, project_name))
     return sorted(results)
 
 
