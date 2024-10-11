@@ -678,7 +678,7 @@ def get_next_version(
     project_name: str,
     remote: str | None = None,
     as_tag: bool = False,
-    add_missing_promote_marker: bool = False,
+    dry_run: bool = True,
 ) -> str | None:
     """
     Return the next version for a given branch based on the latest changes.
@@ -689,9 +689,9 @@ def get_next_version(
         project_name: The name of the project, used to look up the commitizen
             configuration, and find matching tags
         as_tag: Whether to format the version based on tool.tide.tag_format
-        add_missing_promote_marker: if this is called prior to the first promotion
-          of branches, setting this to True will cause a promotion marker to
-          be set so that subsequent calls will not cause a minor version bump.
+        dry_run: if False, simply return the version or tag.  If True,
+            also add missing promote markers, and return None if a branch has
+            not yet received its first seed promotion.
     Returns:
         The next version or tag to be created
     """
@@ -718,12 +718,14 @@ def get_next_version(
     if release_id != ReleaseID.stable:
         prerelease = release_id.value
         if (
-            not current_version.prerelease
+            not dry_run
+            and not current_version.prerelease
             and branch != config.most_experimental_branch()
         ):
-            print(
-                f"Current version {current_version} {current_version.prerelease} {prerelease}"
-            )
+            # tag can be None if a branch has not yet received its first seed promotion.
+            # for example: prior to beta being promoted to rc, there will not be any
+            # rc tags, and we don't want to generate one until the first rc release
+            # comes into existence.
             return None
     else:
         prerelease = None
@@ -734,7 +736,7 @@ def get_next_version(
         provider,
         branch,
         remote,
-        add_missing_promote_marker=add_missing_promote_marker,
+        add_missing_promote_marker=not dry_run,
     )
 
     # Only apply minor increment the most experimental branch
@@ -761,6 +763,11 @@ def get_next_version(
 def get_project_name(pyproject: Path) -> str | None:
     """
     Return the name of the project at the given path.
+
+    A project is a folder with a pyproject.toml file with a `[project].name`
+    value or a `[tool.tide].project` value.
+
+    A project can opt-out by setting `[tool.tide].managed_project = false`
     """
     if not pyproject.suffix == ".toml" and pyproject.is_dir():
         pyproject = pyproject.joinpath("pyproject.toml")

@@ -212,7 +212,7 @@ def autotag(
                 project_name=project_name,
                 remote=remote,
                 as_tag=True,
-                add_missing_promote_marker=True,
+                dry_run=False,
             )
             # tag can be None if a branch has not yet received its first seed promotion.
             # for example: prior to beta being promoted to rc, there will not be any
