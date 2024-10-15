@@ -32,6 +32,7 @@ from .gitutils import (
 if TYPE_CHECKING:
     import gitlab.v4.objects
     import commitizen.providers
+    import commitizen.version_schemes
     import commitizen.cmd
     import commitizen.config
 
@@ -95,6 +96,14 @@ class ReleaseID(str, Enum):
     beta = "beta"
     rc = "rc"
     stable = "stable"
+
+    def prerelease_suffix(self) -> str | None:
+        return {
+            "alpha": "a",
+            "beta": "b",
+            "rc": "rc",
+            "stable": None,
+        }[self.name]
 
 
 def is_url(s: str) -> bool:
@@ -558,10 +567,12 @@ def is_pending_bump(
     Returns:
         whether it is pending or not
     """
-    if branch != config.most_experimental_branch():
+    exp_branch = config.most_experimental_branch()
+    if branch != exp_branch:
         return False
 
     promotion_rev = get_promotion_marker(remote)
+
     if promotion_rev is None:
         if config.verbose:
             click.echo("No promote marker found", err=True)
@@ -570,17 +581,32 @@ def is_pending_bump(
                 raise ValueError(
                     "Must provide remote when setting add_missing_promote_marker=True"
                 )
-            set_promotion_marker(remote, current_rev())
+            set_promotion_marker(remote, current_rev("HEAD~1"))
         return True
     else:
         if config.verbose:
             click.echo(f"Found promotion base rev: {promotion_rev}", err=True)
 
+    suffix = config.branch_to_release_id[exp_branch].prerelease_suffix()
+
+    def prerelease_match(ver: commitizen.version_schemes.VersionProtocol) -> bool:
+        if suffix is None:
+            # I think this should only happen when there is only a stable branch
+            return ver.prerelease is None
+        else:
+            return ver.prerelease is not None and ver.prerelease.startswith(suffix)
+
     matcher = provider._tag_format_matcher()
     # List any tags for this project folder between this branch and the promotion note
     all_tags = get_tags(end_rev=promotion_rev)
-    tags = [t for t in all_tags if matcher(t)]
-    return not tags
+    for tag in all_tags:
+        ver = matcher(tag)
+        # If we find a matching tag and that tag corresponds to our expected branch
+        # then promotion has already occurred.
+        if ver is not None and prerelease_match(ver):
+            return False
+    # no tags found after promotion.  we're still pending.
+    return True
 
 
 def get_promotion_marker(remote: str | None = None) -> str | None:

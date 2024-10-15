@@ -7,6 +7,7 @@ import nox
 import os
 import shutil
 
+nox.options.default_venv_backend = "uv"
 
 HERE = os.path.dirname(__file__)
 
@@ -79,7 +80,7 @@ def ruff_format(session: nox.Session) -> None:
 
 
 @nox.session(reuse_venv=True)
-def type_hints(session: nox.Session) -> None:
+def mypy(session: nox.Session) -> None:
     """
     Check type hints in the project's codebase.
 
@@ -89,7 +90,7 @@ def type_hints(session: nox.Session) -> None:
     Args:
         session: The Nox session context.
     """
-    session.install("mypy==1.9.0")
+    session.install("mypy==1.12.0")
     session.run("mypy", *session.posargs)
 
 

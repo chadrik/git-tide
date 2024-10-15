@@ -1,6 +1,6 @@
 [project]
 name = "git-tide"
-version = "0.2.0"
+version = "0.2.1"
 description = "CLI for automated gitflow-style branching"
 authors = [
     {name="Chad Dombrova"},
@@ -41,7 +41,7 @@ build-backend = "hatchling.build"
 
 
 [tool.mypy]
-python_version = "3.7"
+python_version = "3.9"
 files = ["noxfile.py", "src"]
 ignore_missing_imports = true
 show_error_codes = true

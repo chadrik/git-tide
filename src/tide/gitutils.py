@@ -153,11 +153,11 @@ def checkout_remote_branch(remote: str, branch: str) -> str:
     return get_latest_commit(None, branch)
 
 
-def current_rev() -> str:
+def current_rev(rev: str = "HEAD") -> str:
     """
     Get the SHA for the current git revision.
     """
-    return git("rev-parse", "HEAD", capture=True)
+    return git("rev-parse", rev, capture=True)
 
 
 def print_git_graph(max_count: int | None = None) -> None:

@@ -575,7 +575,9 @@ def run_autotag(
             remote_data.project,
             re.compile(r"^auto-tag$"),
             source="push",
-            updated_after=datetime.fromisoformat(remote_data.project.updated_at),
+            updated_after=datetime.strptime(
+                remote_data.project.updated_at, "%Y-%m-%dT%H:%M:%S.%f%z"
+            ),
         )
         if wait:
             wait_for_job(remote_data.project, job)
@@ -1353,4 +1355,66 @@ def test_dev_cycle_pre_promotion(setup_git_repo, monkeypatch, tmp_path_factory) 
     * | {config.beta}: (projectA) add feature 1 -  (tag: projectA-1.1.0b0)
     |/  
     * initial state -  (tag: projectB-1.0.0, tag: projectA-1.0.0)"""
+    verify_git_graph(expected)
+
+    # -- promote
+
+    tag_args = [
+        {
+            "annotation": "promoting develop to staging!",
+            "base_rev": None,
+            "branch": config.rc,
+        },
+    ]
+    run_promote_and_autotag_jobs(
+        config, tmp_path_factory, tag_args, remote_data, monkeypatch
+    )
+
+    expected = rf"""
+    *   auto-hotfix into {config.beta}: {config.stable}: (projectA) add hotfix -  (HEAD -> {config.rc}, tag: projectA-1.1.0rc0, tag: projectA-1.1.0b1, origin/{config.rc}, origin/{config.beta}, {config.beta})
+    |\  
+    | * {config.stable}: (projectA) add hotfix -  (tag: projectA-1.0.1, origin/{config.stable}, {config.stable})
+    * | {config.beta}: (projectA) add feature 1 -  (tag: projectA-1.1.0b0)
+    |/  
+    * initial state -  (tag: projectB-1.0.0, tag: projectA-1.0.0)"""
+    verify_git_graph(expected)
+
+    # -- commit, autotag, and hotfix
+    # (ProjectA) Add hotfix to RC branch
+    msg = f"{config.rc}: (projectA) add hotfix"
+    commit_file_and_push(config.rc, msg, folder="projectA")
+
+    with pipeline(
+        config,
+        tmp_path_factory,
+        config.rc,
+        "(ProjectA) Add hotfix to RC branch",
+        remote_data,
+        monkeypatch,
+    ) as env:
+        # this pipeline runs in response to a merged merge request
+        run_autotag(env, remote_data)
+        run_hotfix(env, remote_data)
+
+    annotation = f"auto-hotfix into {config.beta}: {config.rc}: (projectA) add hotfix"
+    with pipeline(
+        config,
+        tmp_path_factory,
+        config.beta,
+        "(ProjectA) Cascade hotfix to BETA",
+        remote_data,
+        monkeypatch,
+    ) as env:
+        # this pipeline runs in response to a push from the pipeline above
+        run_autotag(env, remote_data, annotation=annotation)
+
+    expected = r"""
+    * staging: (projectA) add hotfix -  (HEAD -> develop, tag: projectA-1.2.0b0, tag: projectA-1.1.0rc1, origin/staging, origin/develop, staging)
+    *   auto-hotfix into develop: master: (projectA) add hotfix -  (tag: projectA-1.1.0rc0, tag: projectA-1.1.0b1)
+    |\  
+    | * master: (projectA) add hotfix -  (tag: projectA-1.0.1, origin/master, master)
+    * | develop: (projectA) add feature 1 -  (tag: projectA-1.1.0b0)
+    |/  
+    * initial state -  (tag: projectB-1.0.0, tag: projectA-1.0.0)
+    """
     verify_git_graph(expected)
