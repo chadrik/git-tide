@@ -712,133 +712,120 @@ def setup_runner_env(monkeypatch, env: dict[str, str]):
         configure_environment(key, value, monkeypatch)
 
 
-@contextlib.contextmanager
-def pipeline(
-    config: Config,
-    tmp_path_factory,
-    branch: str,
-    description: str,
-    remote_data: GitlabData | LocalData,
-    monkeypatch,
-    base_rev=None,
-) -> Generator[dict[str, str], None]:
-    """
-    Simulate the beginning of a new CI pipeline.
+@dataclasses.dataclass
+class Context:
+    config: Config
+    remote_data: GitlabData | LocalData
+    tmp_path_factory: Any
+    monkeypatch: Any
 
-    Checkout a branch and configure the environment.
+    @contextlib.contextmanager
+    def pipeline(
+        self,
+        branch: str,
+        description: str,
+        base_rev=None,
+    ) -> Generator[dict[str, str], None]:
+        """
+        Simulate the beginning of a new CI pipeline.
 
-    Args:
-        branch: The branch to check out.
-        description: Description of the pipeline for debugging purposes
-        remote_data: Dataclass corresponding to the remote being used
-        monkeypatch: The pytest monkeypatch fixture for setting environment variables.
-        base_rev: The git revision that represents the commit before the commit for
-            the Gitlab pipeline
-    """
-    print()
-    print(f"Starting pipeline: {description}")
-    git("checkout", branch)
-    git("pull")
+        Checkout a branch and configure the environment.
 
-    print()
-    print("USER")
-    print_git_graph()
-
-    cwd = os.getcwd()
-
-    latest_commit = current_rev()
-
-    runner_env = get_runner_env(
-        config, remote_data.remote_url, latest_commit, base_rev, branch
-    )
-
-    if isinstance(remote_data, LocalData):
-        setup_runner_env(monkeypatch, runner_env)
-        tmpdir: Path = tmp_path_factory.mktemp(branch)
-        print("created temporary directory", tmpdir)
-
-        os.chdir(tmpdir)
-        git("init", "-b", branch)
-        # FIXME: in Gitlab the "origin" is configured, and the only branch that exists is the remote trigger branch
-        git("remote", "add", GITLAB_REMOTE, remote_data.remote_url)
-        git("fetch", "--quiet", GITLAB_REMOTE, latest_commit)
-        # in Gitlab all tags exist
-        git("fetch", "--quiet", GITLAB_REMOTE, "--tags")
-        git("checkout", "--detach", latest_commit)
+        Args:
+            branch: The branch to check out.
+            description: Description of the pipeline for debugging purposes
+            base_rev: The git revision that represents the commit before the commit for
+                the Gitlab pipeline
+        """
+        print()
+        print(f"Starting pipeline: {description}")
+        git("checkout", branch)
+        git("pull")
 
         print()
-        print("RUNNER", tmpdir)
+        print("USER")
         print_git_graph()
 
-    yield runner_env
+        cwd = os.getcwd()
 
-    # change to local repo
-    os.chdir(cwd)
+        latest_commit = current_rev()
 
-    # sync with remote
-    git("fetch", "--tags")
-    git("fetch")
-    git("checkout", branch)
+        runner_env = get_runner_env(
+            self.config, self.remote_data.remote_url, latest_commit, base_rev, branch
+        )
 
+        if isinstance(self.remote_data, LocalData):
+            setup_runner_env(self.monkeypatch, runner_env)
+            tmpdir: Path = self.tmp_path_factory.mktemp(branch)
+            print("created temporary directory", tmpdir)
 
-def run_promote_and_autotag_jobs(
-    config: Config,
-    tmp_path_factory,
-    expected_tag_args: list[dict],
-    remote_data,
-    monkeypatch,
-) -> None:
-    """
-    Execute one or more autotag pipelines.
+            os.chdir(tmpdir)
+            git("init", "-b", branch)
+            # FIXME: in Gitlab the "origin" is configured, and the only branch that exists is the remote trigger branch
+            git("remote", "add", GITLAB_REMOTE, self.remote_data.remote_url)
+            git("fetch", "--quiet", GITLAB_REMOTE, latest_commit)
+            # in Gitlab all tags exist
+            git("fetch", "--quiet", GITLAB_REMOTE, "--tags")
+            git("checkout", "--detach", latest_commit)
 
-    Autotag jobs may run in parallel on multiple pipelines.
-    """
-    # Promote (promote always runs on rc, according to our .gitlab-ci.yml)
-    with pipeline(
-        config,
-        tmp_path_factory,
-        config.rc or config.stable,
-        "Promote",
-        remote_data,
-        monkeypatch,
-    ) as env:
-        tag_args = run_promote(env, remote_data, config)
+            print()
+            print("RUNNER", tmpdir)
+            print_git_graph()
 
-    if REMOTE_MODE:
-        assert tag_args is None
-        tag_args = expected_tag_args
-    else:
-        assert len(tag_args) == len(expected_tag_args)
+        yield runner_env
 
-    print("Tag args")
-    pprint.pprint(tag_args)
+        # change to local repo
+        os.chdir(cwd)
 
-    jobs = []
-    for tag_arg in tag_args:
-        with pipeline(
-            config,
-            tmp_path_factory,
-            tag_arg["branch"],
-            "Post-promotion autotag",
-            remote_data,
-            monkeypatch,
-            base_rev=tag_arg["base_rev"],
-        ) as env:
-            jobs.append(
-                run_autotag(
-                    env,
-                    remote_data,
-                    annotation=tag_arg["annotation"],
-                    base_rev=tag_arg["base_rev"],
-                    wait=False,
-                )
-            )
-    if isinstance(remote_data, GitlabData):
-        print("Waiting for jobs: {}".format([job.name for job in jobs]))
-        for job in jobs:
-            wait_for_job(remote_data.project, job)
+        # sync with remote
         git("fetch", "--tags")
         git("fetch")
+        git("checkout", branch)
+
+    def run_promote_and_autotag_jobs(self, expected_tag_args: list[dict]) -> None:
+        """
+        Execute one or more autotag pipelines.
+
+        Autotag jobs may run in parallel on multiple pipelines.
+        """
+        # Promote (promote always runs on rc, according to our .gitlab-ci.yml)
+        with self.pipeline(
+            self.config.rc or self.config.stable,
+            "Promote",
+        ) as env:
+            tag_args = run_promote(env, self.remote_data, self.config)
+
+        if REMOTE_MODE:
+            assert tag_args is None
+            tag_args = expected_tag_args
+        else:
+            assert len(tag_args) == len(expected_tag_args)
+
+        print("Tag args")
+        pprint.pprint(tag_args)
+
+        jobs = []
+        for tag_arg in tag_args:
+            with self.pipeline(
+                tag_arg["branch"],
+                "Post-promotion autotag",
+                base_rev=tag_arg["base_rev"],
+            ) as env:
+                jobs.append(
+                    run_autotag(
+                        env,
+                        self.remote_data,
+                        annotation=tag_arg["annotation"],
+                        base_rev=tag_arg["base_rev"],
+                        wait=False,
+                    )
+                )
+        if isinstance(self.remote_data, GitlabData):
+            print("Waiting for jobs: {}".format([job.name for job in jobs]))
+            for job in jobs:
+                wait_for_job(self.remote_data.project, job)
+            git("fetch", "--tags")
+            git("fetch")
 
 
 @pytest.mark.unit
@@ -865,14 +852,6 @@ def test_get_current_branch_in_ci_environment(config, monkeypatch) -> None:
     runner_env = get_runner_env(config, "fakeurl", "fakecommit", "basebaserev", "beta")
     setup_runner_env(monkeypatch, runner_env)
     assert GitlabRuntime(config).current_branch() == "beta"
-
-
-@dataclasses.dataclass
-class Context:
-    config: Config
-    remote_data: GitlabData | LocalData
-    tmp_path_factory: Any
-    monkeypatch: Any
 
 
 @pytest.mark.unit
@@ -903,17 +882,14 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     print_git_graph()
     print()
 
+    ctx = Context(config, remote_data, tmp_path_factory, monkeypatch)
     # -- commit and autotag
     # (ProjectA) Add feature 1 to BETA branch
     msg = f"{config.beta}: (projectA) add feature 1"
     commit_file_and_push(config.beta, msg, folder="projectA")
-    with pipeline(
-        config,
-        tmp_path_factory,
+    with ctx.pipeline(
         config.beta,
         "(ProjectA) Add feature 1 to BETA branch",
-        remote_data,
-        monkeypatch,
     ) as env:
         # this pipeline runs in response to a merged merge request
         run_autotag(env, remote_data)
@@ -929,9 +905,7 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
         }
     ]
 
-    run_promote_and_autotag_jobs(
-        config, tmp_path_factory, tag_args, remote_data, monkeypatch
-    )
+    ctx.run_promote_and_autotag_jobs(tag_args)
 
     expected = rf"""
     * {config.beta}: (projectA) add feature 1 -  (HEAD -> {config.rc}, tag: projectA-1.1.0rc0, tag: projectA-1.1.0b0, origin/{config.rc}, origin/{config.beta}, {config.beta})
@@ -944,13 +918,9 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     # (ProjectA) Add beta feature 2 to BETA branch
     msg = f"{config.beta}: (projectA) add beta feature 2"
     commit_file_and_push(config.beta, msg, folder="projectA")
-    with pipeline(
-        config,
-        tmp_path_factory,
+    with ctx.pipeline(
         config.beta,
         "(ProjectA) Add beta feature 2 to BETA branch",
-        remote_data,
-        monkeypatch,
     ) as env:
         # this pipeline runs in response to a merged merge request
         run_autotag(env, remote_data)
@@ -967,13 +937,9 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     # (ProjectA) Add hotfix to STABLE branch
     msg = f"{config.stable}: (projectA) add hotfix"
     commit_file_and_push(config.stable, msg, folder="projectA")
-    with pipeline(
-        config,
-        tmp_path_factory,
+    with ctx.pipeline(
         config.stable,
         "(ProjectA) Add hotfix to STABLE branch",
-        remote_data,
-        monkeypatch,
     ) as env:
         # this pipeline runs in response to a merged merge request
         run_autotag(env, remote_data)
@@ -982,13 +948,9 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     assert latest_tag("projectA-*") == "projectA-1.0.1"
 
     annotation = f"auto-hotfix into {config.rc}: {config.stable}: (projectA) add hotfix"
-    with pipeline(
-        config,
-        tmp_path_factory,
+    with ctx.pipeline(
         config.rc,
         "(ProjectA) Cascade hotfix to RC",
-        remote_data,
-        monkeypatch,
     ) as env:
         # this pipeline runs in response to a push from the pipeline above
         run_autotag(env, remote_data, annotation=annotation)
@@ -999,13 +961,9 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     annotation = (
         f"auto-hotfix into {config.beta}: {config.stable}: (projectA) add hotfix"
     )
-    with pipeline(
-        config,
-        tmp_path_factory,
+    with ctx.pipeline(
         config.beta,
         "(ProjectA) Cascade hotfix to BETA",
-        remote_data,
-        monkeypatch,
     ) as env:
         # this pipeline runs in response to a push from the pipeline above
         run_autotag(env, remote_data, annotation=annotation)
@@ -1017,13 +975,9 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     # (ProjectB) Add feature 1 to BETA branch
     msg = f"{config.beta}: (projectB) add feature 1"
     commit_file_and_push(config.beta, msg, folder="projectB")
-    with pipeline(
-        config,
-        tmp_path_factory,
+    with ctx.pipeline(
         config.beta,
         "(ProjectB) Add feature 1 to BETA branch",
-        remote_data,
-        monkeypatch,
     ) as env:
         # this pipeline runs in response to a merged merge request
         run_autotag(env, remote_data)
@@ -1035,13 +989,9 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     # (ProjectA) Add hotfix 2 to RC branch
     msg = f"{config.rc}: (projectA) add hotfix 2"
     commit_file_and_push(config.rc, msg, folder="projectA")
-    with pipeline(
-        config,
-        tmp_path_factory,
+    with ctx.pipeline(
         config.rc,
         "(ProjectA) Add hotfix 2 to RC branch",
-        remote_data,
-        monkeypatch,
     ) as env:
         # this pipeline runs in response to a merged merge request
         run_autotag(env, remote_data)
@@ -1050,13 +1000,9 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     assert latest_tag("projectA-*") == "projectA-1.1.0rc2"
 
     annotation = f"auto-hotfix into {config.beta}: {config.rc}: (projectA) add hotfix 2"
-    with pipeline(
-        config,
-        tmp_path_factory,
+    with ctx.pipeline(
         config.beta,
         "(ProjectA) Cascade hotfix to BETA",
-        remote_data,
-        monkeypatch,
     ) as env:
         # this pipeline runs in response to a push from the pipeline above
         run_autotag(env, remote_data, annotation=annotation)
@@ -1098,9 +1044,7 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
             "branch": config.rc,
         },
     ]
-    run_promote_and_autotag_jobs(
-        config, tmp_path_factory, tag_args, remote_data, monkeypatch
-    )
+    ctx.run_promote_and_autotag_jobs(tag_args)
 
     expected = rf"""
     *   auto-hotfix into {config.beta}: {config.rc}: (projectA) add hotfix 2 -  (HEAD -> {config.rc}, tag: projectB-1.1.0rc0, tag: projectA-1.2.0rc0, tag: projectA-1.2.0b2, origin/{config.rc}, origin/{config.beta}, {config.beta})
@@ -1129,9 +1073,7 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
         }
     ]
 
-    run_promote_and_autotag_jobs(
-        config, tmp_path_factory, tag_args, remote_data, monkeypatch
-    )
+    ctx.run_promote_and_autotag_jobs(tag_args)
 
     expected = rf"""
     *   auto-hotfix into {config.beta}: {config.rc}: (projectA) add hotfix 2 -  (HEAD -> {config.stable}, tag: projectB-1.1.0rc0, tag: projectB-1.1.0, tag: projectA-1.2.0rc0, tag: projectA-1.2.0b2, tag: projectA-1.2.0, origin/{config.rc}, origin/{config.stable}, origin/{config.beta}, {config.rc}, {config.beta})
@@ -1154,9 +1096,7 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
 
     tag_args = []
     # no new tags are created when we run promote and there are no changes on RC or BETA
-    run_promote_and_autotag_jobs(
-        config, tmp_path_factory, tag_args, remote_data, monkeypatch
-    )
+    ctx.run_promote_and_autotag_jobs(tag_args)
     git("checkout", config.stable)
     # verify against the previous "expected" state
     verify_git_graph(expected)
@@ -1201,17 +1141,15 @@ def test_dev_cycle_one_branch(setup_git_repo, monkeypatch, tmp_path_factory) -> 
     print_git_graph()
     print()
 
+    ctx = Context(config, remote_data, tmp_path_factory, monkeypatch)
+
     # -- commit and autotag
     # (ProjectA) Add feature 1 to STABLE branch
     msg = f"{config.stable}: (projectA) add feature 1"
     commit_file_and_push(config.stable, msg, folder="projectA")
-    with pipeline(
-        config,
-        tmp_path_factory,
+    with ctx.pipeline(
         config.stable,
         "(ProjectA) Add feature 1 to STABLE branch",
-        remote_data,
-        monkeypatch,
     ) as env:
         # this pipeline runs in response to a merged merge request
         run_autotag(env, remote_data)
@@ -1222,13 +1160,9 @@ def test_dev_cycle_one_branch(setup_git_repo, monkeypatch, tmp_path_factory) -> 
     # (ProjectA) Add feature 2 to STABLE branch
     msg = f"{config.stable}: (projectB) add feature 1"
     commit_file_and_push(config.stable, msg, folder="projectB")
-    with pipeline(
-        config,
-        tmp_path_factory,
+    with ctx.pipeline(
         config.stable,
         "(projectB) Add feature 1 to STABLE branch",
-        remote_data,
-        monkeypatch,
     ) as env:
         # this pipeline runs in response to a merged merge request
         run_autotag(env, remote_data)
@@ -1237,10 +1171,7 @@ def test_dev_cycle_one_branch(setup_git_repo, monkeypatch, tmp_path_factory) -> 
 
     # -- promote
     tag_args = []
-
-    run_promote_and_autotag_jobs(
-        config, tmp_path_factory, tag_args, remote_data, monkeypatch
-    )
+    ctx.run_promote_and_autotag_jobs(tag_args)
 
     assert latest_tag("projectA-*") == "projectA-1.0.1"
 
@@ -1257,17 +1188,15 @@ def test_dev_cycle_pre_promotion(setup_git_repo, monkeypatch, tmp_path_factory) 
     print_git_graph()
     print()
 
+    ctx = Context(config, remote_data, tmp_path_factory, monkeypatch)
+
     # -- commit and autotag
     # (ProjectA) Add feature 1 to BETA branch
     msg = f"{config.beta}: (projectA) add feature 1"
     commit_file_and_push(config.beta, msg, folder="projectA")
-    with pipeline(
-        config,
-        tmp_path_factory,
+    with ctx.pipeline(
         config.beta,
         "(ProjectA) Add feature 1 to BETA branch",
-        remote_data,
-        monkeypatch,
     ) as env:
         # this pipeline runs in response to a merged merge request
         run_autotag(env, remote_data)
@@ -1286,13 +1215,9 @@ def test_dev_cycle_pre_promotion(setup_git_repo, monkeypatch, tmp_path_factory) 
     * initial state -  (tag: projectB-1.0.0, tag: projectA-1.0.0, origin/{config.rc}, {config.rc})"""
     verify_git_graph(expected)
 
-    with pipeline(
-        config,
-        tmp_path_factory,
+    with ctx.pipeline(
         config.stable,
         "(ProjectA) Add hotfix to STABLE branch",
-        remote_data,
-        monkeypatch,
     ) as env:
         # this pipeline runs in response to a merged merge request
         run_autotag(env, remote_data)
@@ -1308,13 +1233,9 @@ def test_dev_cycle_pre_promotion(setup_git_repo, monkeypatch, tmp_path_factory) 
     verify_git_graph(expected)
 
     annotation = f"auto-hotfix into {config.rc}: {config.stable}: (projectA) add hotfix"
-    with pipeline(
-        config,
-        tmp_path_factory,
+    with ctx.pipeline(
         config.rc,
         "(ProjectA) Cascade hotfix to RC",
-        remote_data,
-        monkeypatch,
     ) as env:
         # this pipeline runs in response to a push from the pipeline above
         run_autotag(env, remote_data, annotation=annotation)
@@ -1335,13 +1256,9 @@ def test_dev_cycle_pre_promotion(setup_git_repo, monkeypatch, tmp_path_factory) 
     annotation = (
         f"auto-hotfix into {config.beta}: {config.stable}: (projectA) add hotfix"
     )
-    with pipeline(
-        config,
-        tmp_path_factory,
+    with ctx.pipeline(
         config.beta,
         "(ProjectA) Cascade hotfix to BETA",
-        remote_data,
-        monkeypatch,
     ) as env:
         # this pipeline runs in response to a push from the pipeline above
         run_autotag(env, remote_data, annotation=annotation)
@@ -1366,9 +1283,7 @@ def test_dev_cycle_pre_promotion(setup_git_repo, monkeypatch, tmp_path_factory) 
             "branch": config.rc,
         },
     ]
-    run_promote_and_autotag_jobs(
-        config, tmp_path_factory, tag_args, remote_data, monkeypatch
-    )
+    ctx.run_promote_and_autotag_jobs(tag_args)
 
     expected = rf"""
     *   auto-hotfix into {config.beta}: {config.stable}: (projectA) add hotfix -  (HEAD -> {config.rc}, tag: projectA-1.1.0rc0, tag: projectA-1.1.0b1, origin/{config.rc}, origin/{config.beta}, {config.beta})
@@ -1384,26 +1299,18 @@ def test_dev_cycle_pre_promotion(setup_git_repo, monkeypatch, tmp_path_factory) 
     msg = f"{config.rc}: (projectA) add hotfix"
     commit_file_and_push(config.rc, msg, folder="projectA")
 
-    with pipeline(
-        config,
-        tmp_path_factory,
+    with ctx.pipeline(
         config.rc,
         "(ProjectA) Add hotfix to RC branch",
-        remote_data,
-        monkeypatch,
     ) as env:
         # this pipeline runs in response to a merged merge request
         run_autotag(env, remote_data)
         run_hotfix(env, remote_data)
 
     annotation = f"auto-hotfix into {config.beta}: {config.rc}: (projectA) add hotfix"
-    with pipeline(
-        config,
-        tmp_path_factory,
+    with ctx.pipeline(
         config.beta,
         "(ProjectA) Cascade hotfix to BETA",
-        remote_data,
-        monkeypatch,
     ) as env:
         # this pipeline runs in response to a push from the pipeline above
         run_autotag(env, remote_data, annotation=annotation)

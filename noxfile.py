@@ -258,9 +258,7 @@ def promote(session: nox.Session) -> None:
 @nox.session
 def build(session: nox.Session) -> None:
     shutil.rmtree("dist")
-    session.run(
-        "uvx", "--from", "build", "pyproject-build", "--installer", "uv", external=True
-    )
+    session.run("uv", "build", external=True)
 
 
 @nox.session
@@ -269,3 +267,6 @@ def publish(session: nox.Session) -> None:
     whl = sorted(glob.glob("./dist/git_tide-*-py3-none-any.whl"))[0]
     print(whl)
     session.run("uvx", "twine", "upload", whl, external=True)
+    # the uv keyring provider doesn't seem to work and I don't want to have
+    # to pass my token every time. revisit this.
+    # session.run("uv", "publish", external=True)
