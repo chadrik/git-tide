@@ -617,17 +617,50 @@ def get_promotion_marker(remote: str | None = None) -> str | None:
         remote: The remote repository name
     """
     git("fetch", remote if remote else "--all", "refs/notes/*:refs/notes/*", quiet=True)
-    output = git("log", "--format=%H %N", "-n20", capture=True)
-    for line in output.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(" ", 1)
-        if len(parts) == 1:
-            continue
-        if parts[1] == PROMOTION_BASE_MSG:
-            return parts[0]
-    return None
+
+    start_rev = "HEAD"
+
+    # Search the history in batches of 100 commits looking for the promotion marker.
+    while True:
+        # TODO: I *think* we could optimize out a "tail call" to `git` if we hit the beginning of
+        #  the history (which will always fail) by checking if our query returned fewer than 100
+        #  commits.
+        try:
+            output = git(
+                "log",
+                "--first-parent",
+                "--format=%H %N",
+                "-n100",
+                start_rev,
+                capture=True,
+            )
+        except subprocess.CalledProcessError:
+            # End of history or invalid ref
+            return None
+
+        if not output:
+            return None
+
+        lines = output.splitlines()
+        last_rev: str | None = None
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            parts = line.split(maxsplit=1)
+            last_rev = parts[0]
+            if len(parts) == 1:
+                continue
+
+            if parts[1] == PROMOTION_BASE_MSG:
+                return last_rev
+
+        if not last_rev:
+            return None
+
+        start_rev = f"{last_rev}^"
 
 
 def set_promotion_marker(remote: str, branch: str) -> None:
