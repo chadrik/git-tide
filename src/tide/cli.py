@@ -4,6 +4,7 @@ import time
 import os
 import subprocess
 import re
+import sys
 from pathlib import Path
 
 from .core import (
@@ -75,8 +76,11 @@ def get_runtime() -> Runtime:
 @click.group(context_settings=CONTEXT_SETTINGS)
 @click.option("--config", "-c", "config_path", metavar="CONFIG", type=str)
 @click.option("--verbose", "-v", is_flag=True, default=False)
-def cli(config_path: str, verbose: bool) -> None:
-    set_config(load_config(config_path, verbose))
+@click.pass_context
+def cli(ctx: click.Context, config_path: str, verbose: bool) -> None:
+    args = sys.argv[1:]
+    if not any(flag in args for flag in ctx.help_option_names):
+        set_config(load_config(config_path, verbose))
 
 
 @cli.command()
@@ -331,7 +335,7 @@ def projects(modified: bool) -> None:
     """
     List project paths within the repo.
 
-    A project is a folder with a pyproject.toml file with a `tool.commitizen` section.
+    A project is a folder with a pyproject.toml file with a `tool.tide` section.
     """
     if modified:
         runtime = get_runtime()
@@ -352,7 +356,7 @@ def projects(modified: bool) -> None:
     "--branch",
     default=None,
     help=(
-        "The release branch to use to determine the next version. "
+        "The release branch to use to determine the version release phase. "
         "Defaults to the current branch."
     ),
 )
@@ -362,7 +366,8 @@ def projects(modified: bool) -> None:
     show_default=True,
     help="The git remote to use to when determining the next version.",
 )
-@click.option("--next", "-n", is_flag=True, default=False)
+@click.option("--next", "-n", is_flag=True, default=False,
+    help="Whether to calculate the next version instead of returning the latest tag ")
 @click.option("--as-tag", "-t", is_flag=True, default=False)
 @click.option(
     "--path",
