@@ -17,7 +17,7 @@ from functools import lru_cache
 from urllib.parse import urlparse, urlunparse
 from abc import abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING, Iterable, Mapping, cast
+from typing import TYPE_CHECKING, Iterable, Mapping, NamedTuple, cast
 
 from .gitutils import (
     git,
@@ -682,21 +682,47 @@ def set_promotion_marker(remote: str, branch: str) -> None:
     git("push", remote, "refs/notes/*")
 
 
-def _get_cz_config(tag_format: str, project_name: str) -> commitizen.config.BaseConfig:
+class CommitizenContext(NamedTuple):
+    """Context for commitizen operations."""
+
+    config: commitizen.config.BaseConfig
+    provider: commitizen.providers.ScmProvider
+    scheme: commitizen.version_schemes.VersionProtocol
+
+
+def _init_commitizen_context(
+    config: Config, project_name: str
+) -> CommitizenContext:
+    """
+    Initialize commitizen configuration, provider, and scheme.
+
+    Args:
+        config: The tide configuration
+        project_name: The name of the project
+
+    Returns:
+        A CommitizenContext containing cz_config, provider, and scheme
+    """
     from commitizen.config.base_config import BaseConfig
     from commitizen.defaults import Settings
+    from commitizen.providers import ScmProvider
+    from commitizen.version_schemes import get_version_scheme
+
+    _patch_cz_run()
 
     cz_config = BaseConfig()
     cz_config.update(
         Settings(
             name="cz_conventional_commits",
-            tag_format=tag_format.replace("$project", project_name),
+            tag_format=config.tag_format.replace("$project", project_name),
             version_scheme="pep440",
             version_provider="scm",
             major_version_zero=False,
         )
     )
-    return cz_config
+    provider = ScmProvider(cz_config)
+    scheme = get_version_scheme(cz_config)
+    return CommitizenContext(cz_config, provider, scheme)
 
 
 def get_current_version(config: Config, project_name: str, as_tag: bool = False) -> str:
@@ -711,21 +737,15 @@ def get_current_version(config: Config, project_name: str, as_tag: bool = False)
     Returns:
         The current version or tag
     """
-    from commitizen.providers import ScmProvider
-    from commitizen.version_schemes import get_version_scheme
     from commitizen import bump
 
-    _patch_cz_run()
-
-    cz_config = _get_cz_config(config.tag_format, project_name)
-    provider = ScmProvider(cz_config)
-    scheme = get_version_scheme(cz_config)
-    current_version = provider.get_version()
+    cz_ctx = _init_commitizen_context(config, project_name)
+    current_version = cz_ctx.provider.get_version()
 
     tag_version = bump.normalize_tag(
         current_version,
-        tag_format=cz_config.settings["tag_format"] if as_tag else "$version",
-        scheme=scheme,
+        tag_format=cz_ctx.config.settings["tag_format"] if as_tag else "$version",
+        scheme=cz_ctx.scheme,
     )
 
     return tag_version
@@ -754,11 +774,8 @@ def get_next_version(
     Returns:
         The next version or tag to be created
     """
-    from commitizen.providers import ScmProvider
-    from commitizen.version_schemes import get_version_scheme, Increment
+    from commitizen.version_schemes import Increment
     from commitizen import bump
-
-    _patch_cz_run()
 
     try:
         release_id = config.branch_to_release_id[branch]
@@ -768,11 +785,8 @@ def get_next_version(
             f"Must be one of {', '.join(config.branches)}"
         )
 
-    cz_config = _get_cz_config(config.tag_format, project_name)
-
-    provider = ScmProvider(cz_config)
-    scheme = get_version_scheme(cz_config)
-    current_version = scheme(provider.get_version())
+    cz_ctx = _init_commitizen_context(config, project_name)
+    current_version = cz_ctx.scheme(cz_ctx.provider.get_version())
 
     if release_id != ReleaseID.stable:
         prerelease = release_id.value
@@ -792,7 +806,7 @@ def get_next_version(
     # Find the closest promotion note to the current branch
     pending_bump = is_pending_bump(
         config,
-        provider,
+        cz_ctx.provider,
         branch,
         remote,
         add_missing_promote_marker=not dry_run,
@@ -814,8 +828,8 @@ def get_next_version(
 
     return bump.normalize_tag(
         new_version,
-        tag_format=cz_config.settings["tag_format"] if as_tag else "$version",
-        scheme=scheme,
+        tag_format=cz_ctx.config.settings["tag_format"] if as_tag else "$version",
+        scheme=cz_ctx.scheme,
     )
 
 
