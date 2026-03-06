@@ -751,6 +751,80 @@ def get_current_version(config: Config, project_name: str, as_tag: bool = False)
     return tag_version
 
 
+def get_version_at_ref(
+    config: Config,
+    project_name: str,
+    ref: str,
+    as_tag: bool = False,
+    release_id: ReleaseID | None = None,
+) -> str:
+    """
+    Return the version at a specific git ref by looking up existing tags.
+
+    Args:
+        config: The tide configuration
+        project_name: The name of the project, used to look up tags
+        ref: The git ref (commit SHA, branch name, tag, etc.) to query
+        as_tag: Whether to format the version based on tool.tide.tag_format
+        release_id: Optional release ID to filter tags by release phase
+
+    Returns:
+        The version or tag at the specified ref
+
+    Raises:
+        click.ClickException: If a matching tag cannot be found at the given ref.
+    """
+    try:
+        tag_list = git("tag", "--points-at", ref, capture=True, quiet=True).splitlines()
+    except subprocess.CalledProcessError:
+        raise click.ClickException(f"Invalid git ref {ref!r}")
+    if not tag_list:
+        raise click.ClickException(f"No tags found at git ref {ref!r}")
+
+    cz_ctx = _init_commitizen_context(config, project_name)
+    matcher = cz_ctx.provider._tag_format_matcher()
+
+    version_tag_map = {version: tag for tag in tag_list if (version := matcher(tag))}
+    if not version_tag_map:
+        raise click.ClickException(
+            f"No version tags found for project {project_name!r} at git ref {ref!r}"
+        )
+
+    if release_id is not None:
+        phase_marker = release_id.prerelease_suffix()
+        if phase_marker is None:
+            phase_versions = [v for v in version_tag_map if v.pre is None]
+        else:
+            phase_versions = [
+                v for v in version_tag_map
+                if v.pre is not None and v.pre[0] == phase_marker
+            ]
+
+        # `version_tag_map` should already be filtered to the desired project, so we expect to
+        # find exactly one version matching the given release phase ID.
+        if len(phase_versions) != 1:
+            if phase_versions:
+                adjective = "Multiple"
+                suffix = f": {', '.join(version_tag_map[v] for v in phase_versions)}"
+            else:
+                adjective = "No"
+                suffix = ""
+            raise click.ClickException(
+                f"{adjective} tags found for project {project_name!r} and release phase "
+                f"{release_id.value!r} at git ref {ref!r}{suffix}"
+            )
+
+        matching_version = phase_versions[0]
+    else:
+        # If no release phase is specified, we just want the "latest" version.
+        matching_version = sorted(version_tag_map)[-1]
+
+    if as_tag:
+        return version_tag_map[matching_version]
+    else:
+        return str(matching_version)
+
+
 def get_next_version(
     config: Config,
     branch: str,
