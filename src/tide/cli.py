@@ -395,9 +395,7 @@ def version(
         )
 
     if branch and not at_ref:
-        raise click.ClickException(
-            "--branch can only be used with --at-ref"
-        )
+        raise click.ClickException("--branch can only be used with --at-ref")
 
     if at_ref:
         release_id = None

@@ -690,9 +690,7 @@ class CommitizenContext(NamedTuple):
     scheme: commitizen.version_schemes.VersionProtocol
 
 
-def _init_commitizen_context(
-    config: Config, project_name: str
-) -> CommitizenContext:
+def _init_commitizen_context(config: Config, project_name: str) -> CommitizenContext:
     """
     Initialize commitizen configuration, provider, and scheme.
 
@@ -796,7 +794,8 @@ def get_version_at_ref(
             phase_versions = [v for v in version_tag_map if v.pre is None]
         else:
             phase_versions = [
-                v for v in version_tag_map
+                v
+                for v in version_tag_map
                 if v.pre is not None and v.pre[0] == phase_marker
             ]
 
