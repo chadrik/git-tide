@@ -372,7 +372,7 @@ def projects(modified: bool) -> None:
 @click.option(
     "--path",
     default=".",
-    type=click.Path(exists=True, file_okay=False),
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
     show_default=True,
     help="Folder within the repository. A pyproject.toml should reside in the "
     "specified directory",
@@ -381,15 +381,15 @@ def version(
     as_tag: bool,
     at_ref: str | None,
     branch: str | None,
-    path: str,
+    path: Path,
 ) -> None:
     """
     Get the current project version
     """
-    project_name = get_project_name(Path(path))
+    project_name = get_project_name(path)
     if project_name is None:
         raise click.ClickException(
-            f"Could not determine the project name at {path}. "
+            f"Could not determine the project name at {path.absolute()}. "
             "Ensure that the folder has a pyproject.toml file "
             "with project.name or tool.tide.project defined"
         )
@@ -442,7 +442,7 @@ def version(
 @click.option(
     "--path",
     default=".",
-    type=click.Path(exists=True, file_okay=False),
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
     show_default=True,
     help="Folder within the repository. A pyproject.toml should reside in the "
     "specified directory",
@@ -451,15 +451,15 @@ def next_version(
     branch: str | None,
     remote: str,
     as_tag: bool,
-    path: str,
+    path: Path,
 ) -> None:
     """
     Get the next project version
     """
-    project_name = get_project_name(Path(path))
+    project_name = get_project_name(path)
     if project_name is None:
         raise click.ClickException(
-            f"Could not determine the project name at {path}. "
+            f"Could not determine the project name at {path.absolute()}. "
             "Ensure that the folder has a pyproject.toml file "
             "with project.name or tool.tide.project defined"
         )
