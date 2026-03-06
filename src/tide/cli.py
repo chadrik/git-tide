@@ -11,6 +11,7 @@ from .core import (
     is_url,
     get_next_version,
     get_current_version,
+    get_version_at_ref,
     get_modified_projects,
     get_project_name,
     get_projects,
@@ -352,6 +353,77 @@ def projects(modified: bool) -> None:
 
 
 @cli.command
+@click.option("--as-tag", "-t", is_flag=True, default=False)
+@click.option(
+    "--at-ref",
+    default=None,
+    metavar="REF",
+    help="Git ref (commit SHA, branch, tag, etc.) to query version at. "
+    "Only existing tags at this ref will be considered.",
+)
+@click.option(
+    "--branch",
+    default=None,
+    metavar="BRANCH",
+    help="Release branch name to filter version tags by release phase. "
+    "Only applies when --at-ref is specified. "
+    "Examples: develop (alpha), staging (rc), master (stable).",
+)
+@click.option(
+    "--path",
+    default=".",
+    type=click.Path(exists=True, file_okay=False),
+    show_default=True,
+    help="Folder within the repository. A pyproject.toml should reside in the "
+    "specified directory",
+)
+def version(
+    as_tag: bool,
+    at_ref: str | None,
+    branch: str | None,
+    path: str,
+) -> None:
+    """
+    Get the current project version
+    """
+    project_name = get_project_name(Path(path))
+    if project_name is None:
+        raise click.ClickException(
+            f"Could not determine the project name at {path}. "
+            "Ensure that the folder has a pyproject.toml file "
+            "with project.name or tool.tide.project defined"
+        )
+
+    if branch and not at_ref:
+        raise click.ClickException(
+            "--branch can only be used with --at-ref"
+        )
+
+    if at_ref:
+        release_id = None
+        if branch:
+            if branch not in CONFIG.branch_to_release_id:
+                raise click.ClickException(
+                    f"Unknown branch '{branch}'. Must be one of: {', '.join(CONFIG.branches)}"
+                )
+            release_id = CONFIG.branch_to_release_id[branch]
+
+        click.echo(
+            get_version_at_ref(
+                CONFIG,
+                project_name=project_name,
+                ref=at_ref,
+                as_tag=as_tag,
+                release_id=release_id,
+            )
+        )
+    else:
+        click.echo(
+            get_current_version(CONFIG, project_name=project_name, as_tag=as_tag)
+        )
+
+
+@cli.command
 @click.option(
     "--branch",
     default=None,
@@ -364,10 +436,8 @@ def projects(modified: bool) -> None:
     "--remote",
     default="origin",
     show_default=True,
-    help="The git remote to use to when determining the next version.",
+    help="The git remote to use when determining the next version.",
 )
-@click.option("--next", "-n", is_flag=True, default=False,
-    help="Whether to calculate the next version instead of returning the latest tag ")
 @click.option("--as-tag", "-t", is_flag=True, default=False)
 @click.option(
     "--path",
@@ -377,15 +447,14 @@ def projects(modified: bool) -> None:
     help="Folder within the repository. A pyproject.toml should reside in the "
     "specified directory",
 )
-def version(
+def next_version(
     branch: str | None,
     remote: str,
-    next: bool,
     as_tag: bool,
     path: str,
 ) -> None:
     """
-    Get the project version
+    Get the next project version
     """
     project_name = get_project_name(Path(path))
     if project_name is None:
@@ -394,20 +463,15 @@ def version(
             "Ensure that the folder has a pyproject.toml file "
             "with project.name or tool.tide.project defined"
         )
-    if next:
-        if branch is None:
-            runtime = get_runtime()
-            branch = runtime.current_branch()
+    if branch is None:
+        runtime = get_runtime()
+        branch = runtime.current_branch()
 
-        click.echo(
-            get_next_version(
-                CONFIG, branch, project_name=project_name, remote=remote, as_tag=as_tag
-            )
+    click.echo(
+        get_next_version(
+            CONFIG, branch, project_name=project_name, remote=remote, as_tag=as_tag
         )
-    else:
-        click.echo(
-            get_current_version(CONFIG, project_name=project_name, as_tag=as_tag)
-        )
+    )
 
 
 def main() -> None:

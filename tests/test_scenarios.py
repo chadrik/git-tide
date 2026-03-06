@@ -413,6 +413,7 @@ def git_graph() -> str:
         "--format=format:%C(white)%s%C(reset) %C(dim white)- %C(auto)%d%C(reset)",
         "--all",
         "--decorate",
+        "--decorate-refs-exclude=refs/remotes/origin/HEAD",
         capture=True,
     )
 
@@ -535,6 +536,10 @@ def _tide(*args: str, capture: bool = False) -> str | subprocess.CompletedProces
         return output
     else:
         return subprocess.run(cmd, text=True, check=True)
+
+
+def get_version_at_ref(path: str, ref: str) -> str:
+    return _tide("version", "--path", path, "--at-ref", ref, capture=True)
 
 
 def gitlab_ci_local(job_name: str, runner_env: dict[str, str]):
@@ -895,6 +900,9 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
         run_autotag(env, remote_data)
 
     assert latest_tag("projectA-*") == "projectA-1.1.0b0"
+    assert get_version_at_ref("projectA", config.beta) == "1.1.0b0"
+    with pytest.raises(subprocess.CalledProcessError):
+        get_version_at_ref("projectB", config.beta)
 
     # -- promote
     tag_args = [
@@ -1026,6 +1034,10 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     * initial state -  (tag: projectB-1.0.0, tag: projectA-1.0.0)
     """
     verify_git_graph(expected)
+
+    assert get_version_at_ref("projectA", f"{config.beta}^^") == "1.2.0b1"
+    with pytest.raises(subprocess.CalledProcessError):
+        assert get_version_at_ref("projectB", config.beta) == "1.1.0b0"
 
     # there are no changes for projectB, so the tag should remain the same
     assert latest_tag("projectB-*") == "projectB-1.1.0b0"
