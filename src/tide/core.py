@@ -616,7 +616,7 @@ def get_promotion_marker(remote: str | None = None) -> str | None:
     Args:
         remote: The remote repository name
     """
-    git("fetch", remote if remote else "--all", "refs/notes/*:refs/notes/*", quiet=True)
+    git("fetch", remote if remote else "--all", "+refs/notes/*:refs/notes/*", quiet=False)
 
     start_rev = "HEAD"
 
