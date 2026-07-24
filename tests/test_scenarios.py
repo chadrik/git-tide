@@ -172,6 +172,122 @@ class GitlabData:
         """https git url"""
         return self.project.http_url_to_repo
 
+    @staticmethod
+    def wait_for_job(
+        gitlab_project: gitlab.v4.objects.Project,
+        gitlab_job: gitlab.v4.objects.ProjectJob,
+    ):
+        """
+        Wait for the given job to complete
+
+        Args:
+            gitlab_project: Project object from the gitlab python API
+            gitlab_job: ProjectJob object from the gitlab python API
+        """
+        tries = 40
+        while tries:
+            print(f"{gitlab_job.name} status: {gitlab_job.status}")
+            if gitlab_job.status == "success":
+                return
+            elif gitlab_job.status in ["failed", "skipped"]:
+                gitlab_job.pprint()
+                raise RuntimeError(f"Job {gitlab_job.status}")
+            time.sleep(5.0)
+            gitlab_job = gitlab_project.jobs.get(gitlab_job.id)
+            tries -= 1
+        gitlab_job.pprint()
+        raise RuntimeError("Job failed to complete")
+
+    @staticmethod
+    def find_pipeline_job(
+        gitlab_project: gitlab.v4.objects.Project,
+        job_name_pattern: re.Pattern,
+        rev: str | None = None,
+        source: str | None = None,
+        updated_after: datetime | None = None,
+    ) -> gitlab.v4.objects.ProjectJob:
+        """
+        Return a Gitlab job matching the given search parameters.
+
+        Args:
+            gitlab_project: Project object from the gitlab python API
+            job_name_pattern: look for jobs whose name matches this regex
+            rev: look for jobs running on the given git revision
+            source: look for jobs triggered by this source event
+            updated_after: look for jobs created or modified after this time
+        """
+        tries = 20
+        while tries:
+            print(
+                f"Searching for active pipeline ({source=}, {rev=}) with {job_name_pattern=}"
+            )
+            # FIXME: it appears that this can deadlock here.
+            pipelines = gitlab_project.pipelines.list(
+                get_all=True, source=source, updated_after=updated_after
+            )
+            non_match = defaultdict(list)
+            for pipeline in pipelines:
+                if pipeline.status in ["success", "failed", "skipped"]:
+                    non_match["status"].append((pipeline.id, pipeline.status))
+                    continue
+                if rev and pipeline.sha != rev:
+                    non_match["rev"].append((pipeline.id, pipeline.rev))
+                    continue
+
+                jobs = pipeline.jobs.list(get_all=True)
+                for job in jobs:
+                    if job_name_pattern.match(job.name):
+                        return job
+                non_match["job_name"].append((pipeline.id, [job.name for job in jobs]))
+            print("Misses")
+            pprint.pprint(dict(non_match))
+            time.sleep(5.0)
+            tries -= 1
+        raise RuntimeError(
+            f"Failed to find {source} job matching {job_name_pattern} for {rev}"
+        )
+
+    @staticmethod
+    def gitlab_ci_local(job_name: str, runner_env: dict[str, str]):
+        options = []
+        remote_path = runner_env["CI_REPOSITORY_URL"]
+        options.extend(["--volume", f"{remote_path}:{remote_path}"])
+        for varname, value in runner_env.items():
+            options.extend(["--variable", f"{varname}={value}"])
+        print(options)
+        subprocess.run(["gitlab-ci-local", job_name] + options, check=True)
+
+    @staticmethod
+    def get_runner_env(
+        config: Config,
+        remote_url: str,
+        latest_commit: str,
+        base_rev: str | None,
+        branch: str,
+    ) -> dict[str, str]:
+        """Return environment variables that would be present on a Gitlab runner"""
+        if not base_rev:
+            try:
+                base_rev = git("rev-parse", "HEAD^", capture=True)
+            except subprocess.CalledProcessError:
+                base_rev = "0000000000000000000000000000000000000000"
+
+        title = git("log", "--pretty=format:%s", "-n1", capture=True)
+        return {
+            "CI_REPOSITORY_URL": remote_url,
+            "CI_PIPELINE_SOURCE": "push",
+            "CI_COMMIT_SHA": latest_commit,
+            "CI_COMMIT_BEFORE_SHA": base_rev,
+            "CI_COMMIT_BRANCH": branch,
+            "CI_COMMIT_TITLE": title,
+            "ACCESS_TOKEN": ACCESS_TOKEN,
+            "GITLAB_USER_EMAIL": "foo@bar.com",
+            "GITLAB_USER_NAME": "fakeuser",
+            "CI_COMMIT_REF_PROTECTED": "true",
+            "CI_DEFAULT_BRANCH": config.most_experimental_branch() or config.stable,
+            "GITLAB_CI": "false",
+        }
+
 
 @dataclasses.dataclass
 class LocalData:
@@ -184,7 +300,7 @@ class LocalData:
 
 @pytest.fixture
 def setup_git_repo(
-    tmpdir, gitlab_project, request
+    tmpdir, gitlab_project: gitlab.v4.objects.Project, request
 ) -> Generator[tuple[str, Config], None, None]:
     """
     Pytest fixture that sets up a temporary Git repository with an initial commit of project files.
@@ -363,27 +479,12 @@ def commit_file_and_push(
     git("push", "-f")
 
 
-def configure_environment(key: str, value: str, monkeypatch) -> None:
-    """
-    Configure an environment variable.
-
-    Args:
-        key (str): The environment variable key.
-        value (str): The environment variable value.
-        monkeypatch: The pytest monkeypatch fixture for setting environment variables.
-
-    Returns:
-        None
-    """
-    monkeypatch.setenv(key, value)
-
-
 def get_tags_with_annotations() -> list[str]:
     """
     Retrieve a chronological list of tags from the Git repository, formatted with their annotations.
 
     Note that chronological order is not reliable due to the fact that jobs run in
-    parallel in Gitlab.
+    parallel in GitlabData.
 
     Returns:
         A list of strings containing tags and their annotations.
@@ -435,80 +536,6 @@ def verify_git_graph(expected_graph: str) -> None:
     assert result == expected, f"Expected graph:\n{expected}\nActual graph:\n{result}"
 
 
-def find_pipeline_job(
-    gitlab_project: gitlab.v4.objects.Project,
-    job_name_pattern: re.Pattern,
-    rev: str | None = None,
-    source: str | None = None,
-    updated_after: datetime | None = None,
-) -> gitlab.v4.objects.ProjectJob:
-    """
-    Return a Gitlab job matching the given search parameters.
-
-    Args:
-        gitlab_project: Project object from the gitlab python API
-        job_name_pattern: look for jobs whose name matches this regex
-        rev: look for jobs running on the given git revision
-        source: look for jobs triggered by this source event
-        updated_after: look for jobs created or modified after this time
-    """
-    tries = 20
-    while tries:
-        print(
-            f"Searching for active pipeline ({source=}, {rev=}) with {job_name_pattern=}"
-        )
-        # FIXME: it appears that this can deadlock here.
-        pipelines = gitlab_project.pipelines.list(
-            get_all=True, source=source, updated_after=updated_after
-        )
-        non_match = defaultdict(list)
-        for pipeline in pipelines:
-            if pipeline.status in ["success", "failed", "skipped"]:
-                non_match["status"].append((pipeline.id, pipeline.status))
-                continue
-            if rev and pipeline.sha != rev:
-                non_match["rev"].append((pipeline.id, pipeline.rev))
-                continue
-
-            jobs = pipeline.jobs.list(get_all=True)
-            for job in jobs:
-                if job_name_pattern.match(job.name):
-                    return job
-            non_match["job_name"].append((pipeline.id, [job.name for job in jobs]))
-        print("Misses")
-        pprint.pprint(dict(non_match))
-        time.sleep(5.0)
-        tries -= 1
-    raise RuntimeError(
-        f"Failed to find {source} job matching {job_name_pattern} for {rev}"
-    )
-
-
-def wait_for_job(
-    gitlab_project: gitlab.v4.objects.Project, gitlab_job: gitlab.v4.objects.ProjectJob
-):
-    """
-    Wait for the given job to complete
-
-    Args:
-        gitlab_project: Project object from the gitlab python API
-        gitlab_job: ProjectJob object from the gitlab python API
-    """
-    tries = 40
-    while tries:
-        print(f"{gitlab_job.name} status: {gitlab_job.status}")
-        if gitlab_job.status == "success":
-            return
-        elif gitlab_job.status in ["failed", "skipped"]:
-            gitlab_job.pprint()
-            raise RuntimeError(f"Job {gitlab_job.status}")
-        time.sleep(5.0)
-        gitlab_job = gitlab_project.jobs.get(gitlab_job.id)
-        tries -= 1
-    gitlab_job.pprint()
-    raise RuntimeError("Job failed to complete")
-
-
 @overload
 def _tide(*args: str, capture: Literal[True]) -> str:
     pass
@@ -542,16 +569,6 @@ def get_version_at_ref(path: str, ref: str) -> str:
     return _tide("version", "--path", path, "--at-ref", ref, capture=True)
 
 
-def gitlab_ci_local(job_name: str, runner_env: dict[str, str]):
-    options = []
-    remote_path = runner_env["CI_REPOSITORY_URL"]
-    options.extend(["--volume", f"{remote_path}:{remote_path}"])
-    for varname, value in runner_env.items():
-        options.extend(["--variable", f"{varname}={value}"])
-    print(options)
-    subprocess.run(["gitlab-ci-local", job_name] + options, check=True)
-
-
 def run_autotag(
     runner_env,
     remote_data: GitlabData | LocalData,
@@ -576,7 +593,7 @@ def run_autotag(
 
     print(f"Running autotag: {annotation=}, {base_rev=}")
     if isinstance(remote_data, GitlabData):
-        job = find_pipeline_job(
+        job = remote_data.find_pipeline_job(
             remote_data.project,
             re.compile(r"^auto-tag$"),
             source="push",
@@ -585,14 +602,14 @@ def run_autotag(
             ),
         )
         if wait:
-            wait_for_job(remote_data.project, job)
+            remote_data.wait_for_job(remote_data.project, job)
         print("autotag job done")
         return job
     else:
         if EXEC_MODE == "gitlab-ci-local":
             # FIXME: use the push-opts file created by backend.push() to more accurately
             #  simulate the flow of variables between jobs
-            gitlab_ci_local(
+            GitlabData.gitlab_ci_local(
                 "auto-tag",
                 runner_env | {f"{ENVVAR_PREFIX}_AUTOTAG_ANNOTATION": annotation},
             )
@@ -629,18 +646,18 @@ def run_promote(
             schedule.play()
         else:
             raise RuntimeError("Could not find Promote schedule")
-        job = find_pipeline_job(
+        job = remote_data.find_pipeline_job(
             remote_data.project,
             re.compile("^promote$"),
             source="schedule",
             updated_after=datetime.fromisoformat(remote_data.project.updated_at),
         )
-        wait_for_job(remote_data.project, job)
+        remote_data.wait_for_job(remote_data.project, job)
         print("promote job done")
         return None
-    else:
+    else:  # LocalData
         if EXEC_MODE == "gitlab-ci-local":
-            gitlab_ci_local("promote", runner_env)
+            GitlabData.gitlab_ci_local("promote", runner_env)
         else:
             time.sleep(DELAY)
             _tide("promote")
@@ -667,54 +684,24 @@ def run_hotfix(runner_env, remote_data: GitlabData | LocalData) -> None:
     """
     job_name = "hotfix"
     if isinstance(remote_data, GitlabData):
-        job = find_pipeline_job(
+        job = remote_data.find_pipeline_job(
             remote_data.project,
             re.compile(f"^{job_name}$"),
             source="push",
             updated_after=datetime.fromisoformat(remote_data.project.updated_at),
         )
-        wait_for_job(remote_data.project, job)
-    else:
+        remote_data.wait_for_job(remote_data.project, job)
+    else:  # LocalData
         if EXEC_MODE == "gitlab-ci-local":
-            gitlab_ci_local(job_name, runner_env)
+            GitlabData.gitlab_ci_local(job_name, runner_env)
         else:
             time.sleep(DELAY)
             _tide("hotfix")
 
 
-def get_runner_env(
-    config: Config,
-    remote_url: str,
-    latest_commit: str,
-    base_rev: str | None,
-    branch: str,
-) -> dict[str, str]:
-    if not base_rev:
-        try:
-            base_rev = git("rev-parse", "HEAD^", capture=True)
-        except subprocess.CalledProcessError:
-            base_rev = "0000000000000000000000000000000000000000"
-
-    title = git("log", "--pretty=format:%s", "-n1", capture=True)
-    return {
-        "CI_REPOSITORY_URL": remote_url,
-        "CI_PIPELINE_SOURCE": "push",
-        "CI_COMMIT_SHA": latest_commit,
-        "CI_COMMIT_BEFORE_SHA": base_rev,
-        "CI_COMMIT_BRANCH": branch,
-        "CI_COMMIT_TITLE": title,
-        "ACCESS_TOKEN": ACCESS_TOKEN,
-        "GITLAB_USER_EMAIL": "foo@bar.com",
-        "GITLAB_USER_NAME": "fakeuser",
-        "CI_COMMIT_REF_PROTECTED": "true",
-        "CI_DEFAULT_BRANCH": config.most_experimental_branch() or config.stable,
-        "GITLAB_CI": "false",
-    }
-
-
 def setup_runner_env(monkeypatch, env: dict[str, str]):
     for key, value in env.items():
-        configure_environment(key, value, monkeypatch)
+        monkeypatch.setenv(key, value)
 
 
 @dataclasses.dataclass
@@ -755,7 +742,7 @@ class Context:
 
         latest_commit = current_rev()
 
-        runner_env = get_runner_env(
+        runner_env = GitlabData.get_runner_env(
             self.config, self.remote_data.remote_url, latest_commit, base_rev, branch
         )
 
@@ -828,14 +815,16 @@ class Context:
         if isinstance(self.remote_data, GitlabData):
             print("Waiting for jobs: {}".format([job.name for job in jobs]))
             for job in jobs:
-                wait_for_job(self.remote_data.project, job)
+                self.remote_data.wait_for_job(self.remote_data.project, job)
             git("fetch", "--tags")
             git("fetch")
 
 
 @pytest.mark.unit
 def test_current_branch_in_ci_environment(config, monkeypatch):
-    runner_env = get_runner_env(config, "fakeurl", "fakecommit", "basebaserev", "beta")
+    runner_env = GitlabData.get_runner_env(
+        config, "fakeurl", "fakecommit", "basebaserev", "beta"
+    )
     setup_runner_env(monkeypatch, runner_env)
     assert GitlabRuntime(config).current_branch() == "beta"
 
@@ -844,7 +833,9 @@ def test_current_branch_in_ci_environment(config, monkeypatch):
 def test_get_remote_in_ci_environment(config, monkeypatch) -> None:
     url = "https://gitlab-ci-token:[MASKED]@gitlab.example.com/someproject/"
 
-    runner_env = get_runner_env(config, url, "fakecommit", "basebaserev", "beta")
+    runner_env = GitlabData.get_runner_env(
+        config, url, "fakecommit", "basebaserev", "beta"
+    )
     setup_runner_env(monkeypatch, runner_env)
     with patch("tide.core.git") as mock_git:
         mock_git.return_value = None
@@ -854,7 +845,9 @@ def test_get_remote_in_ci_environment(config, monkeypatch) -> None:
 
 @pytest.mark.unit
 def test_get_current_branch_in_ci_environment(config, monkeypatch) -> None:
-    runner_env = get_runner_env(config, "fakeurl", "fakecommit", "basebaserev", "beta")
+    runner_env = GitlabData.get_runner_env(
+        config, "fakeurl", "fakecommit", "basebaserev", "beta"
+    )
     setup_runner_env(monkeypatch, runner_env)
     assert GitlabRuntime(config).current_branch() == "beta"
 
