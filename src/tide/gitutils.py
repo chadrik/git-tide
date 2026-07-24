@@ -1,13 +1,13 @@
-from __future__ import absolute_import, print_function, annotations
+from __future__ import annotations
 
 import fnmatch
-import subprocess
-import re
 import os.path
+import re
+import subprocess
 import sys
-
 from functools import lru_cache
-from typing import overload, Iterable, Match, Pattern, Iterator
+from typing import Iterable, Iterator, Match, Pattern, overload
+
 from typing_extensions import Literal
 
 cache = lru_cache(maxsize=None)
@@ -240,7 +240,7 @@ def regexes_to_regex(patterns: Iterable[str]) -> Pattern | None:
     patterns = ["^" + p for p in patterns]
     if len(patterns) > 1:
         reg = "|\n".join("    " + p for p in patterns)
-        pattern = "(?x)(\n{}\n)$".format(reg)
+        pattern = f"(?x)(\n{reg}\n)$"
     elif len(patterns) == 1:
         pattern = patterns[0] + "$"
     else:
