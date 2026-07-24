@@ -1330,3 +1330,112 @@ def test_dev_cycle_pre_promotion(setup_git_repo, monkeypatch, tmp_path_factory) 
     * initial state -  (tag: projectB-1.0.0, tag: projectA-1.0.0)
     """
     verify_git_graph(expected)
+
+
+@pytest.mark.unit
+def test_major_bump_on_breaking(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
+    """
+    A breaking conventional commit on the most-experimental branch escalates the
+    current prerelease cycle to the next major version.
+
+    Verifies:
+    - a breaking commit escalates the cycle to the next major and resets the
+      prerelease counter (1.1.0b1 -> 2.0.0b0)
+    - the major is preserved on subsequent non-breaking commits (2.0.0b1)
+    - a second breaking commit within the same cycle does NOT escalate again
+      (no runaway to 3.0.0): it stays on the 2.x line (2.0.0b2)
+    - the major bump is scoped per-project: a second project that only receives
+      non-breaking changes stays on the 1.x line, even though the breaking
+      change to projectA took it to 2.x during the same cycle.
+    """
+    local_repo, config, remote_data = setup_git_repo
+    assert latest_tag("projectA-*") == "projectA-1.0.0"
+    assert latest_tag("projectB-*") == "projectB-1.0.0"
+
+    ctx = Context(config, remote_data, tmp_path_factory, monkeypatch)
+
+    # -- non-breaking feature starts the cycle (minor bump, as usual)
+    commit_file_and_push(
+        config.beta, "feat(projectA): add feature 1", folder="projectA"
+    )
+    with ctx.pipeline(config.beta, "(projectA) feature 1") as env:
+        run_autotag(env, remote_data)
+    assert latest_tag("projectA-*") == "projectA-1.1.0b0"
+
+    # -- projectB also starts its cycle with a non-breaking feature
+    commit_file_and_push(
+        config.beta, "feat(projectB): add feature 1", folder="projectB"
+    )
+    with ctx.pipeline(config.beta, "(projectB) feature 1") as env:
+        run_autotag(env, remote_data)
+    assert latest_tag("projectB-*") == "projectB-1.1.0b0"
+
+    # -- another non-breaking feature just advances the prerelease counter
+    commit_file_and_push(
+        config.beta, "feat(projectA): add feature 2", folder="projectA"
+    )
+    with ctx.pipeline(config.beta, "(projectA) feature 2") as env:
+        run_autotag(env, remote_data)
+    assert latest_tag("projectA-*") == "projectA-1.1.0b1"
+
+    # -- a breaking change escalates the cycle to the next major, resetting the
+    #    prerelease counter to b0
+    commit_file_and_push(
+        config.beta, "feat(projectA)!: drop the legacy config format", folder="projectA"
+    )
+    with ctx.pipeline(config.beta, "(projectA) breaking change") as env:
+        run_autotag(env, remote_data)
+    assert latest_tag("projectA-*") == "projectA-2.0.0b0"
+
+    # -- projectB's breaking-free change must NOT be escalated by projectA's
+    #    breaking change: it only advances the prerelease counter on the 1.x line
+    commit_file_and_push(
+        config.beta, "feat(projectB): add feature 2", folder="projectB"
+    )
+    with ctx.pipeline(config.beta, "(projectB) feature 2") as env:
+        run_autotag(env, remote_data)
+    assert latest_tag("projectB-*") == "projectB-1.1.0b1"
+
+    # -- a subsequent non-breaking commit preserves the major
+    commit_file_and_push(
+        config.beta, "fix(projectA): tidy up after the rename", folder="projectA"
+    )
+    with ctx.pipeline(config.beta, "(projectA) follow-up fix") as env:
+        run_autotag(env, remote_data)
+    assert latest_tag("projectA-*") == "projectA-2.0.0b1"
+
+    # -- a second breaking change in the same cycle must NOT escalate again
+    commit_file_and_push(
+        config.beta,
+        "feat(projectA)!: remove another deprecated call",
+        folder="projectA",
+    )
+    with ctx.pipeline(config.beta, "(projectA) second breaking change") as env:
+        run_autotag(env, remote_data)
+    assert latest_tag("projectA-*") == "projectA-2.0.0b2"
+
+    # projectA reached 2.x via breaking changes; projectB stayed on 1.x
+    assert latest_tag("projectA-*") == "projectA-2.0.0b2"
+    assert latest_tag("projectB-*") == "projectB-1.1.0b1"
+
+
+@pytest.mark.unit
+def test_breaking_change_rejected_on_hotfix_branch(
+    setup_git_repo, monkeypatch, tmp_path_factory
+) -> None:
+    """
+    Breaking changes are only permitted on the most-experimental branch. A
+    breaking commit on any other (hotfix) branch must cause autotag to error,
+    stopping it from entering the hotfix cascade.
+    """
+    local_repo, config, remote_data = setup_git_repo
+    assert latest_tag("projectA-*") == "projectA-1.0.0"
+
+    ctx = Context(config, remote_data, tmp_path_factory, monkeypatch)
+
+    commit_file_and_push(
+        config.stable, "feat(projectA)!: breaking change on stable", folder="projectA"
+    )
+    with ctx.pipeline(config.stable, "(projectA) breaking change on stable") as env:
+        with pytest.raises(subprocess.CalledProcessError):
+            run_autotag(env, remote_data)
