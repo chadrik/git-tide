@@ -82,23 +82,28 @@ def git(
     cmd = ["git"] + [str(arg).strip() for arg in args]
     if _verbose:
         print(cmd, file=sys.stderr)
-    if capture:
-        output = subprocess.run(
-            cmd,
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL if quiet else None,
-        ).stdout.strip()
-        return output
-    else:
-        return subprocess.run(
+    try:
+        proc = subprocess.run(
             cmd,
             text=True,
             check=True,
-            stdout=subprocess.DEVNULL if quiet else None,
-            stderr=subprocess.DEVNULL if quiet else None,
+            stdout=subprocess.PIPE
+            if capture
+            else (subprocess.DEVNULL if quiet else None),
+            # stderr is captured so that it can be printed if the command fails,
+            # even when quiet is True.
+            stderr=subprocess.PIPE,
         )
+    except subprocess.CalledProcessError as err:
+        if err.stderr:
+            print(err.stderr, file=sys.stderr, end="")
+        raise
+    if proc.stderr and not quiet:
+        print(proc.stderr, file=sys.stderr, end="")
+    if capture:
+        return proc.stdout.strip()
+    else:
+        return proc
 
 
 def get_tags(
