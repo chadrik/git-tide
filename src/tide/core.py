@@ -547,7 +547,7 @@ def cz(*args: str, folder: str | Path | None = None) -> str:
     return output.strip()
 
 
-def is_pending_bump(
+def is_pending_minor_bump(
     config: Config,
     provider: commitizen.providers.ScmProvider,
     branch: str,
@@ -601,7 +601,7 @@ def is_pending_bump(
     all_tags = get_tags(end_rev=promotion_rev)
     for tag in all_tags:
         ver = matcher(tag)
-        # If we find a matching tag and that tag corresponds to our expected branch
+        # If we find a matching tag nd that tag corresponds to our expected branch
         # then promotion has already occurred.
         if ver is not None and prerelease_match(ver):
             return False
@@ -723,6 +723,157 @@ def _init_commitizen_context(config: Config, project_name: str) -> CommitizenCon
     return CommitizenContext(cz_config, provider, scheme)
 
 
+def has_breaking_change(
+    cz_ctx: CommitizenContext,
+    start_rev: str | None,
+    end_rev: str = "HEAD",
+    path: Path | str | None = None,
+) -> bool:
+    """
+    Return whether a breaking conventional commit exists in a commit range.
+
+    Only commitizen's ``MAJOR`` verdict is consumed here: the ``MINOR``/``PATCH``
+    increments implied by ``feat``/``fix`` commits are deliberately ignored,
+    because those are governed by the gitflow cycle rather than by commit
+    messages.
+
+    Args:
+        cz_ctx: commitizen context
+        start_rev: the revision *before* the range (exclusive), or None to scan
+            from the beginning of history.
+        end_rev: the last revision in the range (inclusive).
+        path: if given, only commits that touched this path are considered. This
+            provides per-project attribution: a breaking change to one project
+            does not escalate another.
+    """
+    from commitizen import git as cz_git
+    from commitizen.bump import find_increment
+    from commitizen.cz.conventional_commits import ConventionalCommitsCz
+
+    args = ""
+    if path is not None and str(path) not in (".", ""):
+        args = f"-- {path}"
+
+    commits = cz_git.get_commits(start=start_rev, end=end_rev, args=args)
+    if not commits:
+        return False
+
+    cz = ConventionalCommitsCz(cz_ctx.config)
+    # NOTE: bump_map (rather than bump_map_major_version_zero) is used so that a
+    # breaking change escalates to a major even during 0.x, consistent with the
+    # major_version_zero=False setting in _init_commitizen_context.
+    increment = find_increment(
+        commits, regex=cz.bump_pattern, increments_map=cz.bump_map
+    )
+    return increment == "MAJOR"
+
+
+def _find_nearest_major_version(
+    cz_ctx: CommitizenContext, promotion_rev: str | None
+) -> int:
+    """
+    Return the major version that the current prerelease cycle is based on.
+
+    This finds the highest version tag that existed before the current cycle,
+    bounded by the promotion marker (the same marker is_pending_minor_bump uses to
+    delimit the cycle). It excludes the cycle's own tags - including any major
+    the cycle has already produced - so a second breaking change does not
+    escalate again. A normal (non-breaking) cycle never changes the major, so
+    comparing the current version's major against this value tells us whether
+    the cycle has already escalated.
+    """
+    matcher = cz_ctx.provider._tag_format_matcher()
+    # Tags created during the current cycle (between the promotion marker and
+    # HEAD), the same set is_pending_minor_bump inspects. NOTE: get_tags can only
+    # *exclude* by ref (via end_rev / `git log --not`); its --tags traversal
+    # ignores start_rev, so we identify the cycle tags to subtract rather than
+    # trying to list the base tags directly.
+    cycle_tags = set(get_tags(end_rev=promotion_rev)) if promotion_rev else set()
+    versions = [
+        v
+        for tag in get_tags()
+        if tag not in cycle_tags and (v := matcher(tag)) is not None
+    ]
+    return max(versions).release[0] if versions else 0
+
+
+def is_pending_major_bump(
+    config: Config,
+    cz_ctx: CommitizenContext,
+    branch: str,
+    current_version: commitizen.version_schemes.VersionProtocol,
+    remote: str | None = None,
+    project_path: Path | str | None = None,
+) -> bool:
+    """
+    Return whether the current prerelease cycle should escalate to a new major.
+
+    This mirrors is_pending_minor_bump's once-per-cycle model: escalation happens only
+    on the most-experimental branch, only when a breaking change is present in
+    the cycle, and only if the cycle has not already escalated (guarding against
+    a second breaking change bumping the major a second time).
+    """
+    if branch != config.most_experimental_branch():
+        return False
+
+    promotion_rev = get_promotion_marker(remote)
+
+    if not has_breaking_change(cz_ctx, promotion_rev, "HEAD", project_path):
+        return False
+
+    base_major = _find_nearest_major_version(cz_ctx, promotion_rev)
+    # If the current version's major already exceeds the cycle's base major, the
+    # cycle has already escalated and we must not escalate again.
+    already_escalated = current_version.release[0] > base_major
+    if config.verbose and already_escalated:
+        click.echo(
+            f"Breaking change present but cycle already escalated to major "
+            f"{current_version.release[0]}",
+            err=True,
+        )
+    return not already_escalated
+
+
+def ensure_breaking_change_allowed(
+    config: Config,
+    branch: str,
+    project_name: str,
+    base_rev: str,
+    project_path: Path | str | None = None,
+    raise_error: bool = True,
+) -> None:
+    """
+    Guard against a breaking change appearing where it is not permitted.
+
+    Breaking changes are only allowed on the most-experimental branch, where they
+    escalate the major version. On any other branch a breaking change must not be
+    allowed to enter the hotfix cascade.
+
+    Args:
+        branch: the branch being tagged. Breaking changes are permitted on the
+            most-experimental branch; on any other branch this guard fires.
+        base_rev: the revision before the current push; the range base_rev..HEAD
+            is scanned for breaking changes.
+        raise_error: if True, raise a ClickException when a breaking change is
+            found (used by autotag). If False, emit a warning instead (used by
+            read-only queries like next-version).
+    """
+    exp_branch = config.most_experimental_branch()
+    if exp_branch is None or branch == exp_branch:
+        return
+
+    cz_ctx = _init_commitizen_context(config, project_name)
+    if has_breaking_change(cz_ctx, base_rev, "HEAD", project_path):
+        msg = (
+            f"Breaking change detected on branch {branch!r} for project "
+            f"{project_name!r}. Breaking changes are only permitted on the "
+            f"most-experimental branch ({exp_branch!r})."
+        )
+        if raise_error:
+            raise click.ClickException(msg)
+        click.echo(f"Warning: {msg}", err=True)
+
+
 def get_current_version(config: Config, project_name: str, as_tag: bool = False) -> str:
     """
     Return the current version.
@@ -831,6 +982,7 @@ def get_next_version(
     remote: str | None = None,
     as_tag: bool = False,
     dry_run: bool = True,
+    project_path: Path | str | None = None,
 ) -> str | None:
     """
     Return the next version for a given branch based on the latest changes.
@@ -844,6 +996,9 @@ def get_next_version(
         dry_run: if False, simply return the version or tag.  If True,
             also add missing promote markers, and return None if a branch has
             not yet received its first seed promotion.
+        project_path: the folder containing the project, used to attribute
+            breaking changes to the correct project. If None, it is looked up
+            from the project name.
     Returns:
         The next version or tag to be created
     """
@@ -877,7 +1032,7 @@ def get_next_version(
         prerelease = None
 
     # Find the closest promotion note to the current branch
-    pending_bump = is_pending_bump(
+    pending_bump = is_pending_minor_bump(
         config,
         cz_ctx.provider,
         branch,
@@ -885,9 +1040,20 @@ def get_next_version(
         add_missing_promote_marker=not dry_run,
     )
 
+    # A breaking change escalates the cycle to the next major, taking precedence
+    # over the cycle-start minor bump. Like the minor bump, this only happens on
+    # the most-experimental branch and only once per cycle. The project's folder
+    # is used to attribute breaking changes to the correct project.
+    if project_path is None:
+        project_path = get_project_path(project_name)
+    if is_pending_major_bump(
+        config, cz_ctx, branch, current_version, remote, project_path
+    ):
+        increment: Increment = "MAJOR"
+        exact_increment = True
     # Only apply minor increment the most experimental branch
-    if pending_bump:
-        increment: Increment = "MINOR"
+    elif pending_bump:
+        increment = "MINOR"
         exact_increment = True
     else:
         increment = "PATCH"
@@ -953,6 +1119,14 @@ def get_projects() -> list[tuple[Path, str]]:
         if project_name is not None:
             results.append((pyproject.parent, project_name))
     return sorted(results)
+
+
+def get_project_path(project_name: str) -> Path | None:
+    """Return the folder for the project with the given name, or None if unknown."""
+    for path, name in get_projects():
+        if name == project_name:
+            return path
+    return None
 
 
 def get_modified_projects(

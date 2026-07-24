@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .core import (
     is_url,
+    ensure_breaking_change_allowed,
     get_next_version,
     get_current_version,
     get_version_at_ref,
@@ -210,6 +211,15 @@ def autotag(
         projects_and_paths = get_modified_projects(base_rev, verbose=CONFIG.verbose)
     if projects_and_paths:
         for project_folder, project_name in projects_and_paths:
+            # Breaking changes are only permitted on the most-experimental
+            # branch. Reject them here so they cannot enter the hotfix cascade.
+            ensure_breaking_change_allowed(
+                CONFIG,
+                branch,
+                project_name=project_name,
+                base_rev=base_rev,
+                project_path=project_folder,
+            )
             # Auto-tag
             tag = get_next_version(
                 CONFIG,
@@ -218,6 +228,7 @@ def autotag(
                 remote=remote,
                 as_tag=True,
                 dry_run=False,
+                project_path=project_folder,
             )
             # tag can be None if a branch has not yet received its first seed promotion.
             # for example: prior to beta being promoted to rc, there will not be any
@@ -465,9 +476,30 @@ def next_version(
         runtime = get_runtime()
         branch = runtime.current_branch()
 
+    # This is a read-only query, so warn (rather than error) if a breaking
+    # change is present on a branch where it is not permitted.
+    try:
+        base_rev: str | None = current_rev("HEAD^")
+    except subprocess.CalledProcessError:
+        base_rev = None
+    if base_rev is not None:
+        ensure_breaking_change_allowed(
+            CONFIG,
+            branch,
+            project_name=project_name,
+            base_rev=base_rev,
+            project_path=path,
+            raise_error=False,
+        )
+
     click.echo(
         get_next_version(
-            CONFIG, branch, project_name=project_name, remote=remote, as_tag=as_tag
+            CONFIG,
+            branch,
+            project_name=project_name,
+            remote=remote,
+            as_tag=as_tag,
+            project_path=path,
         )
     )
 
