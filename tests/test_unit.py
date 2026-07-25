@@ -1,26 +1,24 @@
+"""Unit tests for individual tide functions."""
+
 from __future__ import annotations
 
 import os
-
-import pytest
-
 import subprocess
 from pathlib import Path
-from unittest.mock import patch, call
+from unittest.mock import call, patch
 
 import click
+import pytest
 
+from tide.core import (
+    get_modified_projects,
+)
 from tide.gitutils import (
     checkout_remote_branch,
     get_branches,
     get_latest_commit,
     join,
 )
-
-from tide.core import (
-    get_modified_projects,
-)
-
 
 HERE = os.path.dirname(__file__)
 VERBOSE = os.environ.get("VERBOSE", "false").lower() in ("true", "1")
@@ -113,9 +111,7 @@ os.environ["TIDE_PATCH_CZ_RUN"] = "true"
 @pytest.mark.unit
 def test_get_modified_projects(config) -> None:
     # Note: we patch core.git and not gitutils.git, bc it's already imported
-    with patch("tide.core.git") as mock_git, patch(
-        "tide.core.get_projects"
-    ) as mock_get_projects:
+    with patch("tide.core.git") as mock_git, patch("tide.core.get_projects") as mock_get_projects:
         mock_git.return_value = "\n".join(
             [
                 "projectA/path.py",
@@ -125,9 +121,7 @@ def test_get_modified_projects(config) -> None:
             (Path("projectA"), "projectA"),
             (Path("projectB"), "projectB"),
         ]
-        assert get_modified_projects(base_rev="fake") == [
-            (Path("projectA"), "projectA")
-        ]
+        assert get_modified_projects(base_rev="fake") == [(Path("projectA"), "projectA")]
 
 
 @pytest.mark.unit

@@ -1,3 +1,5 @@
+"""Smoke tests which verify tide is installed and runnable."""
+
 import pytest
 
 

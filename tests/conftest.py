@@ -1,3 +1,5 @@
+"""Shared pytest configuration and fixtures."""
+
 from __future__ import annotations
 
 import os.path
@@ -18,7 +20,5 @@ def config() -> Config:
     from tide.cli import set_config
 
     return set_config(
-        tide.core.load_config(
-            os.path.join(HERE, "..", "pyproject.toml"), verbose=VERBOSE
-        )
+        tide.core.load_config(os.path.join(HERE, "..", "pyproject.toml"), verbose=VERBOSE)
     )

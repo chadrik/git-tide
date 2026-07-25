@@ -1,3 +1,5 @@
+"""End-to-end tests which simulate gitflow CI pipelines."""
+
 from __future__ import annotations
 
 import contextlib
@@ -6,43 +8,41 @@ import fnmatch
 import json
 import os
 import pprint
-import textwrap
-import tempfile
-import time
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+import time
+import uuid
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Generator, Literal, overload
+from unittest.mock import patch
+from urllib.parse import urlparse, urlunparse
 
+import click
 import gitlab
 import gitlab.const
 import gitlab.v4.objects
 import pytest
-import shutil
-import subprocess
-import sys
-import uuid
-from datetime import datetime
-from urllib.parse import urlparse, urlunparse
-from pathlib import Path
-from collections import defaultdict
-from typing import Any, Generator, Literal, overload
-from unittest.mock import patch
 
-import click
-
+from tide.cli import set_config
+from tide.core import (
+    ENVVAR_PREFIX,
+    GITLAB_REMOTE,
+    Config,
+    GitlabBackend,
+    GitlabRuntime,
+    load_config,
+)
 from tide.gitutils import (
     current_rev,
     git,
     print_git_graph,
 )
-
-from tide.core import (
-    GitlabRuntime,
-    GitlabBackend,
-    load_config,
-    Config,
-    GITLAB_REMOTE,
-    ENVVAR_PREFIX,
-)
-from tide.cli import set_config
 
 EXEC_MODE = os.environ.get("EXEC_MODE", "local")
 assert EXEC_MODE in ["local", "remote", "gitlab-ci-local"]
@@ -70,8 +70,7 @@ VERBOSE = os.environ.get("VERBOSE", "false").lower() in ("true", "1")
 
 
 def all_tags(pattern: str | None = None) -> list[str]:
-    """
-    Return all of the tags in the Git repository.
+    """Return all of the tags in the Git repository.
 
     Args:
         pattern: glob pattern for tag names
@@ -90,8 +89,7 @@ def all_tags(pattern: str | None = None) -> list[str]:
 
 
 def latest_tag(pattern: str | None = None) -> str:
-    """
-    Retrieves the most recently created tag in the Git repository.
+    """Retrieves the most recently created tag in the Git repository.
 
     This function runs the `git describe --tags --abbrev=0` command to get the most recent tag in the current branch.
 
@@ -109,8 +107,7 @@ def latest_tag(pattern: str | None = None) -> str:
 
 @pytest.fixture
 def gitlab_project():
-    """
-    Create a Gitlab project with a randomized name if REMOTE_MODE is enabled.
+    """Create a Gitlab project with a randomized name if REMOTE_MODE is enabled.
 
     Uses GITLAB_API_URL which defaults to gitlab.com.
 
@@ -150,13 +147,9 @@ def gitlab_project():
 
     if REMOTE_MODE and not FORCE_GITLAB_REMOTE:
         # cleanup old projects
-        projects = gl.projects.list(
-            owned=True, visibility=gitlab.const.Visibility.PRIVATE
-        )
+        projects = gl.projects.list(owned=True, visibility=gitlab.const.Visibility.PRIVATE)
         # these are sorted from newest to oldest
-        projects = [
-            project for project in projects if project.name.startswith("semver-demo-")
-        ]
+        projects = [project for project in projects if project.name.startswith("semver-demo-")]
         if len(projects) > KEEP_OLD_GITLAB_PROJECTS:
             for project in projects[KEEP_OLD_GITLAB_PROJECTS:]:
                 print(f"Cleaning up Gitlab project {project.name}")
@@ -165,11 +158,13 @@ def gitlab_project():
 
 @dataclasses.dataclass
 class GitlabData:
+    """Details of the Gitlab project standing in for the remote in a test run."""
+
     project: gitlab.v4.objects.Project
 
     @property
     def remote_url(self) -> str:
-        """https git url"""
+        """HTTPS git url."""
         return self.project.http_url_to_repo
 
     @staticmethod
@@ -177,8 +172,7 @@ class GitlabData:
         gitlab_project: gitlab.v4.objects.Project,
         gitlab_job: gitlab.v4.objects.ProjectJob,
     ):
-        """
-        Wait for the given job to complete
+        """Wait for the given job to complete.
 
         Args:
             gitlab_project: Project object from the gitlab python API
@@ -206,8 +200,7 @@ class GitlabData:
         source: str | None = None,
         updated_after: datetime | None = None,
     ) -> gitlab.v4.objects.ProjectJob:
-        """
-        Return a Gitlab job matching the given search parameters.
+        """Return a Gitlab job matching the given search parameters.
 
         Args:
             gitlab_project: Project object from the gitlab python API
@@ -218,9 +211,7 @@ class GitlabData:
         """
         tries = 20
         while tries:
-            print(
-                f"Searching for active pipeline ({source=}, {rev=}) with {job_name_pattern=}"
-            )
+            print(f"Searching for active pipeline ({source=}, {rev=}) with {job_name_pattern=}")
             # FIXME: it appears that this can deadlock here.
             pipelines = gitlab_project.pipelines.list(
                 get_all=True, source=source, updated_after=updated_after
@@ -243,9 +234,7 @@ class GitlabData:
             pprint.pprint(dict(non_match))
             time.sleep(5.0)
             tries -= 1
-        raise RuntimeError(
-            f"Failed to find {source} job matching {job_name_pattern} for {rev}"
-        )
+        raise RuntimeError(f"Failed to find {source} job matching {job_name_pattern} for {rev}")
 
     @staticmethod
     def gitlab_ci_local(job_name: str, runner_env: dict[str, str]):
@@ -265,7 +254,7 @@ class GitlabData:
         base_rev: str | None,
         branch: str,
     ) -> dict[str, str]:
-        """Return environment variables that would be present on a Gitlab runner"""
+        """Return environment variables that would be present on a Gitlab runner."""
         if not base_rev:
             try:
                 base_rev = git("rev-parse", "HEAD^", capture=True)
@@ -291,6 +280,8 @@ class GitlabData:
 
 @dataclasses.dataclass
 class LocalData:
+    """Details of the local directory standing in for the remote in a test run."""
+
     tempdir: tempfile.TemporaryDirectory
 
     @property
@@ -302,8 +293,7 @@ class LocalData:
 def setup_git_repo(
     tmpdir, gitlab_project: gitlab.v4.objects.Project, request
 ) -> Generator[tuple[str, Config], None, None]:
-    """
-    Pytest fixture that sets up a temporary Git repository with an initial commit of project files.
+    """Pytest fixture that sets up a temporary Git repository with an initial commit of project files.
 
     Args:
         tmpdir: Temporary directory provided by pytest.
@@ -323,9 +313,7 @@ def setup_git_repo(
     print(f"Git repo: {tmp_path}")
     os.chdir(tmp_path)
 
-    parent_directory = Path(
-        os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    )
+    parent_directory = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
     files_to_copy = [
         ".gitignore",
         ".gitlab-ci.yml",
@@ -346,11 +334,7 @@ def setup_git_repo(
             raise TypeError(src)
 
     # Update the tide section of pyproject.toml
-    lines = (
-        parent_directory.joinpath("pyproject.toml")
-        .read_text()
-        .splitlines(keepends=False)
-    )
+    lines = parent_directory.joinpath("pyproject.toml").read_text().splitlines(keepends=False)
     index = lines.index("[tool.tide]")
     pyproject = tmp_path.joinpath("pyproject.toml")
     lines = lines[: index + 1]
@@ -453,8 +437,7 @@ project = "{project}"
 def commit_file_and_push(
     branch: str, message: str, folder: str | None = None, filename: str | None = None
 ) -> None:
-    """
-    Create a file and commit it to the repository.
+    """Create a file and commit it to the repository.
 
     Args:
         message: The commit message.
@@ -480,8 +463,7 @@ def commit_file_and_push(
 
 
 def get_tags_with_annotations() -> list[str]:
-    """
-    Retrieve a chronological list of tags from the Git repository, formatted with their annotations.
+    """Retrieve a chronological list of tags from the Git repository, formatted with their annotations.
 
     Note that chronological order is not reliable due to the fact that jobs run in
     parallel in GitlabData.
@@ -520,8 +502,7 @@ def git_graph() -> str:
 
 
 def verify_git_graph(expected_graph: str) -> None:
-    """
-    Verify the current state of the git graph matches an expected graph.
+    """Verify the current state of the git graph matches an expected graph.
 
     Args:
         expected_graph (str): The expected output of the git log graph command.
@@ -556,9 +537,7 @@ def _tide(*args: str, capture: bool = False) -> str | subprocess.CompletedProces
         cmd.append("--verbose")
     cmd.extend(args)
     if capture:
-        output = subprocess.run(
-            cmd, check=True, text=True, stdout=subprocess.PIPE
-        ).stdout.strip()
+        output = subprocess.run(cmd, check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
         print(output)
         return output
     else:
@@ -576,8 +555,7 @@ def run_autotag(
     base_rev: str | None = None,
     wait: bool = True,
 ) -> gitlab.v4.objects.ProjectJob | None:
-    """
-    Trigger the 'autotag' command to automatically generate a new git tag.
+    """Trigger the 'autotag' command to automatically generate a new git tag.
 
     Args:
         runner_env: dict of env vars used to setup the runner env
@@ -629,8 +607,7 @@ def run_promote(
     remote_data: GitlabData | LocalData,
     config: Config,
 ) -> list[dict[str, str]] | None:
-    """
-    Promote changes in a git repository to simulate a promotion process handled typically by CI/CD.
+    """Promote changes in a git repository to simulate a promotion process handled typically by CI/CD.
 
     Args:
         runner_env: dict of env vars used to setup the runner env
@@ -674,8 +651,7 @@ def run_promote(
 
 
 def run_hotfix(runner_env, remote_data: GitlabData | LocalData) -> None:
-    """
-    Trigger the 'hotfix' command to handle hotfix operations without affecting minor version increments.
+    """Trigger the 'hotfix' command to handle hotfix operations without affecting minor version increments.
 
     Args:
         runner_env: dict of env vars used to setup the runner env
@@ -706,6 +682,8 @@ def setup_runner_env(monkeypatch, env: dict[str, str]):
 
 @dataclasses.dataclass
 class Context:
+    """State shared by the steps of a single test scenario."""
+
     config: Config
     remote_data: GitlabData | LocalData
     tmp_path_factory: Any
@@ -718,8 +696,7 @@ class Context:
         description: str,
         base_rev=None,
     ) -> Generator[dict[str, str], None]:
-        """
-        Simulate the beginning of a new CI pipeline.
+        """Simulate the beginning of a new CI pipeline.
 
         Checkout a branch and configure the environment.
 
@@ -775,8 +752,7 @@ class Context:
         git("checkout", branch)
 
     def run_promote_and_autotag_jobs(self, expected_tag_args: list[dict]) -> None:
-        """
-        Execute one or more autotag pipelines.
+        """Execute one or more autotag pipelines.
 
         Autotag jobs may run in parallel on multiple pipelines.
         """
@@ -813,7 +789,7 @@ class Context:
                     )
                 )
         if isinstance(self.remote_data, GitlabData):
-            print("Waiting for jobs: {}".format([job.name for job in jobs]))
+            print(f"Waiting for jobs: {[job.name for job in jobs]}")
             for job in jobs:
                 self.remote_data.wait_for_job(self.remote_data.project, job)
             git("fetch", "--tags")
@@ -822,9 +798,7 @@ class Context:
 
 @pytest.mark.unit
 def test_current_branch_in_ci_environment(config, monkeypatch):
-    runner_env = GitlabData.get_runner_env(
-        config, "fakeurl", "fakecommit", "basebaserev", "beta"
-    )
+    runner_env = GitlabData.get_runner_env(config, "fakeurl", "fakecommit", "basebaserev", "beta")
     setup_runner_env(monkeypatch, runner_env)
     assert GitlabRuntime(config).current_branch() == "beta"
 
@@ -833,9 +807,7 @@ def test_current_branch_in_ci_environment(config, monkeypatch):
 def test_get_remote_in_ci_environment(config, monkeypatch) -> None:
     url = "https://gitlab-ci-token:[MASKED]@gitlab.example.com/someproject/"
 
-    runner_env = GitlabData.get_runner_env(
-        config, url, "fakecommit", "basebaserev", "beta"
-    )
+    runner_env = GitlabData.get_runner_env(config, url, "fakecommit", "basebaserev", "beta")
     setup_runner_env(monkeypatch, runner_env)
     with patch("tide.core.git") as mock_git:
         mock_git.return_value = None
@@ -845,17 +817,14 @@ def test_get_remote_in_ci_environment(config, monkeypatch) -> None:
 
 @pytest.mark.unit
 def test_get_current_branch_in_ci_environment(config, monkeypatch) -> None:
-    runner_env = GitlabData.get_runner_env(
-        config, "fakeurl", "fakecommit", "basebaserev", "beta"
-    )
+    runner_env = GitlabData.get_runner_env(config, "fakeurl", "fakecommit", "basebaserev", "beta")
     setup_runner_env(monkeypatch, runner_env)
     assert GitlabRuntime(config).current_branch() == "beta"
 
 
 @pytest.mark.unit
 def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
-    """
-    Test the development cycle by mimicking typical operations in a CICD environment.
+    """Test the development cycle by mimicking typical operations in a CICD environment.
 
     This uses a 3-repo system to emulate Gitlab CI.
 
@@ -959,9 +928,7 @@ def test_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
 
     assert latest_tag("projectA-*") == "projectA-1.1.0rc1"
 
-    annotation = (
-        f"auto-hotfix into {config.beta}: {config.stable}: (projectA) add hotfix"
-    )
+    annotation = f"auto-hotfix into {config.beta}: {config.stable}: (projectA) add hotfix"
     with ctx.pipeline(
         config.beta,
         "(ProjectA) Cascade hotfix to BETA",
@@ -1136,9 +1103,7 @@ projectA-1.0.0           initial state"""
 @pytest.mark.unit
 @pytest.mark.branches({"stable": "main"})
 def test_dev_cycle_one_branch(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
-    """
-    Test the development cycle by mimicking typical operations in a CICD environment.
-    """
+    """Test the development cycle by mimicking typical operations in a CICD environment."""
     local_repo, config, remote_data = setup_git_repo
     assert os.path.isdir(local_repo)
     assert latest_tag("projectA-*") == "projectA-1.0.0"
@@ -1183,9 +1148,7 @@ def test_dev_cycle_one_branch(setup_git_repo, monkeypatch, tmp_path_factory) -> 
 
 @pytest.mark.unit
 def test_dev_cycle_pre_promotion(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
-    """
-    Test what happens when hotfixes are merged into beta before any promotion has occurred.
-    """
+    """Test what happens when hotfixes are merged into beta before any promotion has occurred."""
     local_repo, config, remote_data = setup_git_repo
     assert os.path.isdir(local_repo)
     assert latest_tag("projectA-*") == "projectA-1.0.0"
@@ -1258,9 +1221,7 @@ def test_dev_cycle_pre_promotion(setup_git_repo, monkeypatch, tmp_path_factory) 
     * initial state -  (tag: projectB-1.0.0, tag: projectA-1.0.0)"""
     verify_git_graph(expected)
 
-    annotation = (
-        f"auto-hotfix into {config.beta}: {config.stable}: (projectA) add hotfix"
-    )
+    annotation = f"auto-hotfix into {config.beta}: {config.stable}: (projectA) add hotfix"
     with ctx.pipeline(
         config.beta,
         "(ProjectA) Cascade hotfix to BETA",

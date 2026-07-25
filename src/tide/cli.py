@@ -1,37 +1,43 @@
-from __future__ import absolute_import, print_function, annotations
-import click
-import time
+"""Command line interface for tide."""
+
+from __future__ import annotations
+
 import os
-import subprocess
 import re
+import subprocess
 import sys
+import time
 from pathlib import Path
 
+import click
+
 from .core import (
-    is_url,
-    get_next_version,
-    get_current_version,
-    get_version_at_ref,
-    get_modified_projects,
-    get_project_name,
-    get_projects,
-    load_config,
-    promote as _promote,
-    Config,
-    Runtime,
-    Backend,
-    GitlabBackend,
-    TestGitlabBackend,
-    GitlabRuntime,
-    TestGitlabRuntime,
-    LocalRuntime,
     ENVVAR_PREFIX,
     HOTFIX_MESSAGE,
+    Backend,
+    Config,
+    GitlabBackend,
+    GitlabRuntime,
+    LocalRuntime,
+    Runtime,
+    TestGitlabBackend,
+    TestGitlabRuntime,
+    get_current_version,
+    get_modified_projects,
+    get_next_version,
+    get_project_name,
+    get_projects,
+    get_version_at_ref,
+    is_url,
+    load_config,
+)
+from .core import (
+    promote as _promote,
 )
 from .gitutils import (
-    git,
     checkout_remote_branch,
     current_rev,
+    git,
     print_git_graph,
     set_git_verbose,
 )
@@ -41,9 +47,7 @@ CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
 
 def set_config(config: Config) -> Config:
-    """
-    Set the global configuration object.
-    """
+    """Set the global configuration object."""
     global CONFIG
     CONFIG = config
     set_git_verbose(config.verbose)
@@ -51,9 +55,7 @@ def set_config(config: Config) -> Config:
 
 
 def get_backend(url: str | None = None) -> Backend:
-    """
-    Return a Backend corresponding to where the current python process is pushing/pulling.
-    """
+    """Return a Backend corresponding to where the current python process is pushing/pulling."""
     if os.environ.get("GITLAB_CI", "false") == "true" or (url and "gitlab" in url):
         return GitlabBackend(CONFIG)
     else:
@@ -61,9 +63,7 @@ def get_backend(url: str | None = None) -> Backend:
 
 
 def get_runtime() -> Runtime:
-    """
-    Return a Runtime corresponding to where the current python process is *running*
-    """
+    """Return a Runtime corresponding to where the current python process is *running*."""
     if os.environ.get("GITLAB_CI", "false") == "true":
         return GitlabRuntime(CONFIG)
     # gitlab-ci-local and our unittests set this to false as an inidicator that
@@ -126,8 +126,7 @@ def init(
     init_local: bool,
     init_remote: bool,
 ) -> None:
-    """
-    Initialize the current git repo and its associated Gitlab project for use with tide.
+    """Initialize the current git repo and its associated Gitlab project for use with tide.
 
     This command must be run from a git repo, and the repo must have the Gitlab project setup
     as a remote, either by being cloned from it, or via `git remote add`.
@@ -188,11 +187,10 @@ def init(
     "(those with a `[project].name` value)",
 )
 @click.option("--dry-run", is_flag=True, default=False)
-def autotag(
-    annotation: str, base_rev: str | None, projects: list[str], dry_run: bool
-) -> None:
-    """
-    Tag the current branch with a new version number and push the tag to the remote repository.
+def autotag(annotation: str, base_rev: str | None, projects: list[str], dry_run: bool) -> None:
+    """Tag the current branch with a new version number.
+
+    The new tag is pushed to the remote repository.
     """
     runtime = get_runtime()
     branch = runtime.current_branch()
@@ -239,9 +237,7 @@ def autotag(
                 git("tag", "-a", tag, "-m", annotation)
 
             # FIXME: we may want to push all tags at once
-            click.echo(
-                f"Pushing '{tag}' to {remote}" + (" (dry_run=True)" if dry_run else "")
-            )
+            click.echo(f"Pushing '{tag}' to {remote}" + (" (dry_run=True)" if dry_run else ""))
             if not dry_run:
                 backend.push(remote, tag)
     else:
@@ -250,9 +246,7 @@ def autotag(
 
 @cli.command()
 def hotfix() -> None:
-    """
-    Merge hotfixes from a feature branch back to upstream branches.
-    """
+    """Merge hotfixes from a feature branch back to upstream branches."""
     runtime = get_runtime()
     branch = runtime.current_branch()
     remote = runtime.get_remote()
@@ -265,9 +259,7 @@ def hotfix() -> None:
     # Record the current state
     message = git("log", "--pretty=format: %s", "-1", capture=True)
     # strip out previous Automerge formatting
-    match = re.match(
-        HOTFIX_MESSAGE.format(upstream_branch="[^:]+", message="(.*)$"), message
-    )
+    match = re.match(HOTFIX_MESSAGE.format(upstream_branch="[^:]+", message="(.*)$"), message)
     if match:
         message = match.groups()[0]
 
@@ -315,8 +307,7 @@ def hotfix() -> None:
 
 @cli.command()
 def promote() -> None:
-    """
-    Promote changes through the branch hierarchy.
+    """Promote changes through the branch hierarchy.
 
     e.g. from alpha -> beta -> rc -> stable.
     """
@@ -333,16 +324,13 @@ def promote() -> None:
 # FIXME: add output format
 # FIXME: add option to write to file
 def projects(modified: bool) -> None:
-    """
-    List project paths within the repo.
+    """List project paths within the repo.
 
     A project is a folder with a pyproject.toml file with a `tool.tide` section.
     """
     if modified:
         runtime = get_runtime()
-        projects_ = get_modified_projects(
-            runtime.get_base_rev(), verbose=CONFIG.verbose
-        )
+        projects_ = get_modified_projects(runtime.get_base_rev(), verbose=CONFIG.verbose)
     else:
         projects_ = get_projects()
 
@@ -374,8 +362,7 @@ def projects(modified: bool) -> None:
     default=".",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     show_default=True,
-    help="Folder within the repository. A pyproject.toml should reside in the "
-    "specified directory",
+    help="Folder within the repository. A pyproject.toml should reside in the specified directory",
 )
 def version(
     as_tag: bool,
@@ -383,9 +370,7 @@ def version(
     branch: str | None,
     path: Path,
 ) -> None:
-    """
-    Get the current project version
-    """
+    """Get the current project version."""
     project_name = get_project_name(path)
     if project_name is None:
         raise click.ClickException(
@@ -416,9 +401,7 @@ def version(
             )
         )
     else:
-        click.echo(
-            get_current_version(CONFIG, project_name=project_name, as_tag=as_tag)
-        )
+        click.echo(get_current_version(CONFIG, project_name=project_name, as_tag=as_tag))
 
 
 @cli.command
@@ -442,8 +425,7 @@ def version(
     default=".",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     show_default=True,
-    help="Folder within the repository. A pyproject.toml should reside in the "
-    "specified directory",
+    help="Folder within the repository. A pyproject.toml should reside in the specified directory",
 )
 def next_version(
     branch: str | None,
@@ -451,9 +433,7 @@ def next_version(
     as_tag: bool,
     path: Path,
 ) -> None:
-    """
-    Get the next project version
-    """
+    """Get the next project version."""
     project_name = get_project_name(path)
     if project_name is None:
         raise click.ClickException(
@@ -466,9 +446,7 @@ def next_version(
         branch = runtime.current_branch()
 
     click.echo(
-        get_next_version(
-            CONFIG, branch, project_name=project_name, remote=remote, as_tag=as_tag
-        )
+        get_next_version(CONFIG, branch, project_name=project_name, remote=remote, as_tag=as_tag)
     )
 
 

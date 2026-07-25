@@ -58,3 +58,57 @@ tag_format = "$version"
 branches.beta = "develop"
 branches.rc = "staging"
 branches.stable = "master"
+
+[tool.ruff]
+# these defaults are reused in sub-projects via [tool.ruff].extend
+show-fixes = true
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "B006",  # Do not use mutable data structures for argument defaults
+    "B039",  # Do not use mutable data structures for `ContextVar` defaults
+    "D",
+    "E",
+    "F",
+    "I",
+    "N",
+    "PYI",
+    "Q",
+    "RUF008",  # Do not use mutable default values for dataclass attributes
+    "RUF024",  # Do not pass mutable objects as values to dict.fromkeys
+    "TID251",  # Banned APIs (configured under `tool.ruff.lint.flake8-tidy-imports.banned-api`)
+    "TID252",  # Prefer absolute imports over relative imports from parent modules
+    "UP",
+    "W",
+]
+
+ignore = [
+    # "D100",  # Missing docstring in public module
+    # "D101",  # Missing docstring in public class
+    "D102",  # Missing docstring in public method
+    "D103",  # Missing docstring in public function
+    "D104",  # Missing docstring in public package
+    "D105",  # Missing docstring in magic method
+    "D106",  # Missing docstring in public nested class
+    "D107",  # Missing docstring in __init__
+    "D200",  # One-line docstring should fit on one line
+    "D205",  # 1 blank line required between summary line and description
+    "D417",  # Missing argument description in the docstring
+]
+
+# Some of Ruff's "fixes" are not ideal, so we disable them as needed to avoid confusion.
+unfixable = [
+    "B006"
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The expected `git log --graph` fixtures in this module are compared byte-for-byte,
+# so their long lines and significant trailing whitespace must be preserved as-is.
+"tests/test_scenarios.py" = [
+    "E501",  # Line too long
+    "W291",  # Trailing whitespace
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

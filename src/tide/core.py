@@ -1,9 +1,11 @@
-from __future__ import absolute_import, print_function, annotations
+"""Core gitflow logic: configuration, runtimes, backends, and promotion."""
 
+from __future__ import annotations
+
+import json
 import os
 import shlex
 import subprocess
-import json
 
 import click
 
@@ -11,30 +13,30 @@ try:
     import tomli as tomllib  # noqa: F401
 except ImportError:
     import tomllib  # type: ignore[no-redef]
-from pathlib import Path
-from dataclasses import dataclass, field
-from functools import lru_cache
-from urllib.parse import urlparse, urlunparse
 from abc import abstractmethod
+from dataclasses import dataclass, field
 from enum import Enum
+from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Mapping, NamedTuple, cast
+from urllib.parse import urlparse, urlunparse
 
 from .gitutils import (
-    git,
-    checkout_remote_branch,
-    get_tags,
-    branch_exists,
-    join,
-    current_rev,
     GitRepo,
+    branch_exists,
+    checkout_remote_branch,
+    current_rev,
+    get_tags,
+    git,
+    join,
 )
 
 if TYPE_CHECKING:
-    import gitlab.v4.objects
-    import commitizen.providers
-    import commitizen.version_schemes
     import commitizen.cmd
     import commitizen.config
+    import commitizen.providers
+    import commitizen.version_schemes
+    import gitlab.v4.objects
 
 
 TOOL_NAME = "tide"
@@ -51,9 +53,7 @@ PROMOTION_MESSAGE = "promoting {upstream_branch} to {branch}!"
 cache = lru_cache(maxsize=None)
 
 
-def _patched_run(
-    cmd: str, env: Mapping[str, str] | None = None
-) -> commitizen.cmd.Command:
+def _patched_run(cmd: str, env: Mapping[str, str] | None = None) -> commitizen.cmd.Command:
     import commitizen.cmd
 
     process = subprocess.Popen(
@@ -75,8 +75,7 @@ def _patched_run(
 
 
 def _patch_cz_run() -> None:
-    """
-    commitizen.cmd.run uses shell=True, which can introduce inconsistency
+    """commitizen.cmd.run uses shell=True, which can introduce inconsistency
     based on user profiles, etc.
     """
     if os.environ.get("TIDE_PATCH_CZ_RUN", "0").lower() not in ["1", "true"]:
@@ -90,7 +89,7 @@ def _patch_cz_run() -> None:
 
 
 class ReleaseID(str, Enum):
-    """Represents semver pre-releases, plus 'stable' (i.e. non-pre-release)"""
+    """Represents semver pre-releases, plus 'stable' (i.e. non-pre-release)."""
 
     alpha = "alpha"
     beta = "beta"
@@ -107,15 +106,12 @@ class ReleaseID(str, Enum):
 
 
 def is_url(s: str) -> bool:
-    """
-    Return whether the string looks like a URL.
-    """
+    """Return whether the string looks like a URL."""
     return "://" in s
 
 
 def load_config(path: str | None = None, verbose: bool = False) -> Config:
-    """
-    Load and return the GitFlow configuration from the pyproject.toml file.
+    """Load and return the GitFlow configuration from the pyproject.toml file.
 
     Returns:
         A configuration object
@@ -136,9 +132,7 @@ def load_config(path: str | None = None, verbose: bool = False) -> Config:
     try:
         branches = settings["branches"]
     except KeyError:
-        raise click.ClickException(
-            f"'tool.{TOOL_NAME}.branches' section missing: {path}"
-        )
+        raise click.ClickException(f"'tool.{TOOL_NAME}.branches' section missing: {path}")
 
     config = Config(verbose=verbose)
 
@@ -164,6 +158,8 @@ def load_config(path: str | None = None, verbose: bool = False) -> Config:
 
 @dataclass
 class Config:
+    """Gitflow branch configuration, as loaded from `tool.tide` in pyproject.toml."""
+
     # mapping from id to branch name
     stable: str = "master"
     rc: str | None = None
@@ -178,8 +174,7 @@ class Config:
     tag_format: str = "$version"
 
     def get_upstream_branch(self, branch: str) -> str | None:
-        """
-        Determine the upstream branch for a given branch name based on configuration.
+        """Determine the upstream branch for a given branch name based on configuration.
 
         Args:
             branch: The name of the branch for which to find the upstream branch.
@@ -201,8 +196,7 @@ class Config:
             return None
 
     def most_experimental_branch(self) -> str | None:
-        """
-        Return the most experimental branch.
+        """Return the most experimental branch.
 
         This branch corresponds to the earliest pre-release specified by the config.
         """
@@ -213,17 +207,14 @@ class Config:
 
 
 class Runtime:
-    """
-    Interact with a git repo that is local to the current process
-    """
+    """Interact with a git repo that is local to the current process."""
 
     def __init__(self, config: Config):
         self.config = config
 
     @abstractmethod
     def current_branch(self) -> str:
-        """
-        Get the current git branch name.
+        """Get the current git branch name.
 
         Returns:
             The name of the current branch.
@@ -234,18 +225,16 @@ class Runtime:
 
     @abstractmethod
     def get_base_rev(self) -> str:
-        """
-        Get the git revision that represents the state of the repo before the changes
-        that triggered the current pipeline
+        """Get the git revision representing the repo state before the current pipeline.
 
-        The files changed after this revision will be used to determine which
+        This is the state of the repo before the changes that triggered the current
+        pipeline. The files changed after this revision will be used to determine which
         project tags to increment.
         """
 
     @abstractmethod
     def get_remote(self) -> str:
-        """
-        Configure and retrieve the name of a Git remote for use in CI environments.
+        """Configure and retrieve the name of a Git remote for use in CI environments.
 
         This function configures a Git remote using environment variables
         that should be set in the GitLab CI/CD environment. It configures the git user credentials,
@@ -258,9 +247,7 @@ class Runtime:
 
 
 class Backend:
-    """
-    Interact with a remote git backend.
-    """
+    """Interact with a remote git backend."""
 
     def __init__(self, config: Config):
         self.config = config
@@ -282,8 +269,7 @@ class Backend:
         git("push", *args, *opts)
 
     def init_local_repo(self, remote_name: str) -> None:
-        """
-        Setup the local repository.
+        """Setup the local repository.
 
         Args:
             remote_name: name of the git remote, used to query the url
@@ -315,11 +301,8 @@ class Backend:
                 self.push("--set-upstream", remote_name, branch, skip_ci=True)
 
     @abstractmethod
-    def init_remote_repo(
-        self, remote_url: str, access_token: str, save_token: bool
-    ) -> None:
-        """
-        Setup the remote repository.
+    def init_remote_repo(self, remote_url: str, access_token: str, save_token: bool) -> None:
+        """Setup the remote repository.
 
         Args:
             remote_url: URL of the git remote
@@ -329,6 +312,8 @@ class Backend:
 
 
 class GitlabRuntime(Runtime):
+    """Interact with a git repo from within a Gitlab CI job."""
+
     def current_branch(self) -> str:
         try:
             return os.environ["CI_COMMIT_BRANCH"]
@@ -359,15 +344,13 @@ class GitlabRuntime(Runtime):
 
 
 class GitlabBackend(Backend):
-    """Gitlab-specific behavior"""
+    """Gitlab-specific behavior."""
 
     PROMOTION_SCHEDULED_JOB_NAME = "Promote Gitflow Branches"
 
     @cache
     def _conn(self, base_url: str, access_token: str) -> gitlab.Gitlab:
-        """
-        Get a cached gitlab connection object.
-        """
+        """Get a cached gitlab connection object."""
         try:
             import gitlab
         except ImportError:
@@ -384,18 +367,14 @@ class GitlabBackend(Backend):
     def _find_promote_job(
         self, project: gitlab.v4.objects.Project
     ) -> gitlab.v4.objects.ProjectPipelineSchedule | None:
-        """
-        Find the scheduled job that is used to trigger promotion.
-        """
+        """Find the scheduled job that is used to trigger promotion."""
         schedules = project.pipelineschedules.list(get_all=True)
         for schedule in schedules:
             if schedule.description == self.PROMOTION_SCHEDULED_JOB_NAME:
                 return schedule
         return None
 
-    def init_remote_repo(
-        self, remote_url: str, access_token: str, save_token: bool
-    ) -> None:
+    def init_remote_repo(self, remote_url: str, access_token: str, save_token: bool) -> None:
         try:
             import gitlab.const
             import gitlab.exceptions
@@ -434,9 +413,7 @@ class GitlabBackend(Backend):
                 )
                 click.echo("Created ACCESS_TOKEN project variable", err=True)
             else:
-                click.echo(
-                    "ACCESS_TOKEN project variable already exists. Skipping", err=True
-                )
+                click.echo("ACCESS_TOKEN project variable already exists. Skipping", err=True)
         else:
             # FIXME: validate that ACCESS_TOKEN has been set at the project or group level
             pass
@@ -480,9 +457,7 @@ class GitlabBackend(Backend):
 
 
 class LocalRuntime(Runtime):
-    """
-    Used for processes running in local git repos, not in CI.
-    """
+    """Used for processes running in local git repos, not in CI."""
 
     def current_branch(self) -> str:
         branch = git("branch", "--show-current", capture=True)
@@ -503,6 +478,8 @@ class LocalRuntime(Runtime):
 
 
 class TestGitlabRuntime(GitlabRuntime):
+    """`GitlabRuntime` variant used by the test suite."""
+
     @cache
     def _setup_remote(self, url: str) -> None:
         # overridden to prevent adding the oath token to the remote url
@@ -511,6 +488,8 @@ class TestGitlabRuntime(GitlabRuntime):
 
 
 class TestGitlabBackend(GitlabBackend):
+    """`GitlabBackend` variant used by the test suite."""
+
     @cache
     def _conn(self, base_url: str, access_token: str) -> gitlab.Gitlab:
         # overridden to return a mocked Gitlab connection object.
@@ -536,9 +515,7 @@ class TestGitlabBackend(GitlabBackend):
 
 
 def cz(*args: str, folder: str | Path | None = None) -> str:
-    """
-    Run commitizen in a subprocess.
-    """
+    """Run commitizen in a subprocess."""
     output = subprocess.check_output(
         ["cz"] + list(args),
         text=True,
@@ -554,8 +531,7 @@ def is_pending_bump(
     remote: str | None = None,
     add_missing_promote_marker: bool = False,
 ) -> bool:
-    """
-    Return whether the given branch and folder combination are awaiting a minor bump.
+    """Return whether the given branch and folder combination are awaiting a minor bump.
 
     Args:
         remote: The remote repository name
@@ -578,9 +554,7 @@ def is_pending_bump(
             click.echo("No promote marker found", err=True)
         if add_missing_promote_marker:
             if remote is None:
-                raise ValueError(
-                    "Must provide remote when setting add_missing_promote_marker=True"
-                )
+                raise ValueError("Must provide remote when setting add_missing_promote_marker=True")
             set_promotion_marker(remote, current_rev("HEAD~1"))
         return True
     else:
@@ -610,8 +584,7 @@ def is_pending_bump(
 
 
 def get_promotion_marker(remote: str | None = None) -> str | None:
-    """
-    Get the hash for the most recent promotion commit.
+    """Get the hash for the most recent promotion commit.
 
     Args:
         remote: The remote repository name
@@ -664,8 +637,7 @@ def get_promotion_marker(remote: str | None = None) -> str | None:
 
 
 def set_promotion_marker(remote: str, branch: str) -> None:
-    """
-    Store a state for whether the given project on the given branch needs to have a minor bump.
+    """Store a state for whether the given project on the given branch needs to have a minor bump.
 
     If it is true for a given branch, then get_next_tag() will return a minor increment.
     After this, autotag() will set the pending state to False until.
@@ -677,7 +649,8 @@ def set_promotion_marker(remote: str, branch: str) -> None:
         branch: one of the registered gitflow branches
     """
     git("fetch", remote, "refs/notes/*:refs/notes/*")
-    # FIXME: forcing here, because the same commit can be the promotion base more than once.  should we skip?
+    # FIXME: forcing here, because the same commit can be the promotion base more than
+    #  once.  should we skip?
     git("notes", "add", "--force", "-m", PROMOTION_BASE_MSG, branch)
     git("push", remote, "refs/notes/*")
 
@@ -691,8 +664,7 @@ class CommitizenContext(NamedTuple):
 
 
 def _init_commitizen_context(config: Config, project_name: str) -> CommitizenContext:
-    """
-    Initialize commitizen configuration, provider, and scheme.
+    """Initialize commitizen configuration, provider, and scheme.
 
     Args:
         config: The tide configuration
@@ -724,8 +696,7 @@ def _init_commitizen_context(config: Config, project_name: str) -> CommitizenCon
 
 
 def get_current_version(config: Config, project_name: str, as_tag: bool = False) -> str:
-    """
-    Return the current version.
+    """Return the current version.
 
     Args:
         project_name: The name of the project, used to look up the commitizen
@@ -756,8 +727,7 @@ def get_version_at_ref(
     as_tag: bool = False,
     release_id: ReleaseID | None = None,
 ) -> str:
-    """
-    Return the version at a specific git ref by looking up existing tags.
+    """Return the version at a specific git ref by looking up existing tags.
 
     Args:
         config: The tide configuration
@@ -794,9 +764,7 @@ def get_version_at_ref(
             phase_versions = [v for v in version_tag_map if v.pre is None]
         else:
             phase_versions = [
-                v
-                for v in version_tag_map
-                if v.pre is not None and v.pre[0] == phase_marker
+                v for v in version_tag_map if v.pre is not None and v.pre[0] == phase_marker
             ]
 
         # `version_tag_map` should already be filtered to the desired project, so we expect to
@@ -832,8 +800,7 @@ def get_next_version(
     as_tag: bool = False,
     dry_run: bool = True,
 ) -> str | None:
-    """
-    Return the next version for a given branch based on the latest changes.
+    """Return the next version for a given branch based on the latest changes.
 
     Args:
         remote: The remote repository name
@@ -844,18 +811,18 @@ def get_next_version(
         dry_run: if False, simply return the version or tag.  If True,
             also add missing promote markers, and return None if a branch has
             not yet received its first seed promotion.
+
     Returns:
         The next version or tag to be created
     """
-    from commitizen.version_schemes import Increment
     from commitizen import bump
+    from commitizen.version_schemes import Increment
 
     try:
         release_id = config.branch_to_release_id[branch]
     except KeyError:
         raise click.ClickException(
-            f"{branch} is not a valid release branch.  "
-            f"Must be one of {', '.join(config.branches)}"
+            f"{branch} is not a valid release branch.  Must be one of {', '.join(config.branches)}"
         )
 
     cz_ctx = _init_commitizen_context(config, project_name)
@@ -907,8 +874,7 @@ def get_next_version(
 
 
 def get_project_name(pyproject: Path) -> str | None:
-    """
-    Return the name of the project at the given path.
+    """Return the name of the project at the given path.
 
     A project is a folder with a pyproject.toml file with a `[project].name`
     value or a `[tool.tide].project` value.
@@ -955,9 +921,7 @@ def get_projects() -> list[tuple[Path, str]]:
     return sorted(results)
 
 
-def get_modified_projects(
-    base_rev: str, verbose: bool = False
-) -> list[tuple[Path, str]]:
+def get_modified_projects(base_rev: str, verbose: bool = False) -> list[tuple[Path, str]]:
     """Get the list of projects with changes files.
 
     A project is defined as a folder with a pyproject.toml file with a `tool.tide` section.
@@ -1011,8 +975,7 @@ def get_projects_from_files(files: Iterable[Path]) -> list[tuple[Path, str]]:
 
 
 def promote(config: Config, backend: Backend, runtime: Runtime) -> None:
-    """
-    Promote changes through the branch hierarchy.
+    """Promote changes through the branch hierarchy.
 
     e.g. from alpha -> beta -> rc -> stable.
     """
@@ -1023,7 +986,8 @@ def promote(config: Config, backend: Backend, runtime: Runtime) -> None:
     local_output = []
 
     def promote_branch(branch: str, log_msg_template: str) -> None:
-        """
+        """Promote a branch to its upstream branch.
+
         - Checkout the branch
         - Merge with the upstream branch, if it exists
         - Push, skipping hotfixes
@@ -1059,11 +1023,7 @@ def promote(config: Config, backend: Backend, runtime: Runtime) -> None:
         backend.push("--atomic", remote, branch, variables=variables)
 
         # FIXME: switch to using push-opts.json
-        if (
-            isinstance(backend, TestGitlabBackend)
-            and upstream_branch
-            and base_rev != current_rev()
-        ):
+        if isinstance(backend, TestGitlabBackend) and upstream_branch and base_rev != current_rev():
             push_info = {
                 "annotation": log_msg,
                 "base_rev": base_rev,

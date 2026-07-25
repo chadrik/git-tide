@@ -1,3 +1,5 @@
+"""Helpers for running git commands and filtering repo paths."""
+
 from __future__ import annotations
 
 import fnmatch
@@ -25,9 +27,7 @@ GLOB_TO_REGEX = [
     (",", "|"),
 ]
 GLOB_TO_REGEX_MAP = dict(GLOB_TO_REGEX)
-GLOB_TO_REGEX_REG = re.compile(
-    r"({})".format("|".join(re.escape(f) for f, r in GLOB_TO_REGEX))
-)
+GLOB_TO_REGEX_REG = re.compile(r"({})".format("|".join(re.escape(f) for f, r in GLOB_TO_REGEX)))
 
 _verbose: bool = False
 
@@ -38,8 +38,7 @@ def set_git_verbose(enabled: bool = True) -> None:
 
 
 def join(remote: str | None, branch: str) -> str:
-    """
-    Construct a full branch path with remote prefix if specified.
+    """Construct a full branch path with remote prefix if specified.
 
     Args:
         remote: The remote repository name
@@ -67,8 +66,7 @@ def git(*args: str, quiet: bool = False) -> subprocess.CompletedProcess[str]:
 def git(
     *args: str, quiet: bool = False, capture: bool = False
 ) -> subprocess.CompletedProcess | str:
-    """
-    Execute a git command with the specified arguments.
+    """Execute a git command with the specified arguments.
 
     Args:
         *args: Command line arguments for git.
@@ -87,9 +85,7 @@ def git(
             cmd,
             text=True,
             check=True,
-            stdout=subprocess.PIPE
-            if capture
-            else (subprocess.DEVNULL if quiet else None),
+            stdout=subprocess.PIPE if capture else (subprocess.DEVNULL if quiet else None),
             # stderr is captured so that it can be printed if the command fails,
             # even when quiet is True.
             stderr=subprocess.PIPE,
@@ -109,8 +105,7 @@ def git(
 def get_tags(
     pattern: str | None = None, start_rev: str = "HEAD", end_rev: str | None = None
 ) -> list[str]:
-    """
-    Return all of the tags in the Git repository.
+    """Return all of the tags in the Git repository.
 
     Args:
         pattern: glob pattern for tag names
@@ -134,8 +129,7 @@ def get_tags(
 
 
 def get_branches() -> list[str]:
-    """
-    Retrieve a list of all local branches in the git repository.
+    """Retrieve a list of all local branches in the git repository.
 
     Returns:
         A list of branch names.
@@ -145,8 +139,7 @@ def get_branches() -> list[str]:
 
 
 def checkout_remote_branch(remote: str, branch: str) -> str:
-    """
-    Check out a specific remote branch, creating it if it doesn't exist.
+    """Check out a specific remote branch, creating it if it doesn't exist.
 
     Args:
         remote: The remote repository name
@@ -159,16 +152,12 @@ def checkout_remote_branch(remote: str, branch: str) -> str:
 
 
 def current_rev(rev: str = "HEAD") -> str:
-    """
-    Get the SHA for the current git revision.
-    """
+    """Get the SHA for the current git revision."""
     return git("rev-parse", rev, capture=True)
 
 
 def print_git_graph(max_count: int | None = None) -> None:
-    """
-    Prints the git graph in color, for debugging purposes
-    """
+    """Prints the git graph in color, for debugging purposes."""
     args = [
         "log",
         "--graph",
@@ -183,8 +172,7 @@ def print_git_graph(max_count: int | None = None) -> None:
 
 
 def branch_exists(branch: str) -> bool:
-    """
-    Return whether the given branch exists.
+    """Return whether the given branch exists.
 
     Args:
         branch: branch name
@@ -197,8 +185,7 @@ def branch_exists(branch: str) -> bool:
 
 
 def get_latest_commit(remote: str | None, branch_name: str) -> str:
-    """
-    Fetch the latest commit hash from a specific branch.
+    """Fetch the latest commit hash from a specific branch.
 
     Args:
         remote: The remote repository name
@@ -216,8 +203,7 @@ def get_latest_commit(remote: str | None, branch_name: str) -> str:
 
 
 def glob_to_regex(pattern: str) -> str:
-    """
-    Convert a glob to a regular expression.
+    """Convert a glob to a regular expression.
 
     Unlike fnmatch.translate, this handles ** syntax, which match across multiple
     directories, and ensures that * globs only match within one level.
@@ -234,9 +220,7 @@ def glob_to_regex(pattern: str) -> str:
 
 
 def regexes_to_regex(patterns: Iterable[str]) -> Pattern | None:
-    """
-    Convert a tuple of regex strings to a single regex Pattern
-    """
+    """Convert a tuple of regex strings to a single regex Pattern."""
     patterns = ["^" + p for p in patterns]
     if len(patterns) > 1:
         reg = "|\n".join("    " + p for p in patterns)
@@ -255,9 +239,7 @@ def regexes_to_regex(patterns: Iterable[str]) -> Pattern | None:
 
 @cache
 def globs_to_regex(patterns: tuple[str, ...]) -> Pattern | None:
-    """
-    Convert a tuple of glob patterns to a single regex Pattern.
-    """
+    """Convert a tuple of glob patterns to a single regex Pattern."""
     return regexes_to_regex(glob_to_regex(p) for p in patterns)
 
 
@@ -266,16 +248,15 @@ def filter_paths_regex(
     include: Pattern | None = None,
     exclude: Pattern | None = None,
 ) -> Iterator[str]:
-    """
+    """Yield the paths which match the include pattern and not the exclude pattern.
+
     Args:
         paths: iterable of paths to filter
         include: regex include pattern
         exclude: regex exclude pattern
     """
     for path in paths:
-        if (not include or include.search(path)) and (
-            not exclude or not exclude.search(path)
-        ):
+        if (not include or include.search(path)) and (not exclude or not exclude.search(path)):
             yield path
 
 
@@ -284,7 +265,8 @@ def filter_paths(
     include: tuple[str, ...] | None = None,
     exclude: tuple[str, ...] | None = None,
 ) -> list[str]:
-    """
+    """Return the paths which match the include globs and not the exclude globs.
+
     Args:
         paths: iterable of paths to filter
         include: tuple of glob include patterns
@@ -300,18 +282,14 @@ def filter_paths(
 
 
 class GitRepo:
-    """
-    Query and filter files from git and cache results
-    """
+    """Query and filter files from git and cache results."""
 
     def __init__(self, root: str):
         self.root: str = root
 
     @cache
     def files(self) -> list[str]:
-        """
-        Return all of the files in the git repo, at the current commit.
-        """
+        """Return all of the files in the git repo, at the current commit."""
         output = subprocess.check_output(["git", "ls-files"], cwd=self.root)
         return [x for x in output.decode().split("\n") if x]
 
@@ -319,8 +297,7 @@ class GitRepo:
     def file_matches(
         self, include: tuple[str, ...] | None, exclude: tuple[str, ...] | None = None
     ) -> list[str]:
-        """
-        Return file paths in the git repo at the current commit.
+        """Return file paths in the git repo at the current commit.
 
         Args:
             include: tuple of glob include patterns
@@ -330,9 +307,7 @@ class GitRepo:
 
     @cache
     def folders(self) -> list[str]:
-        """
-        Return all of the folders in the git repo, at the current commit.
-        """
+        """Return all of the folders in the git repo, at the current commit."""
         results = set()
         for path in self.files():
             while True:
@@ -346,8 +321,7 @@ class GitRepo:
     def folder_matches(
         self, include: tuple[str, ...] | None, exclude: tuple[str, ...] | None = None
     ) -> list[str]:
-        """
-        Return folder paths in the git repo at the current commit.
+        """Return folder paths in the git repo at the current commit.
 
         Args:
             include: tuple of glob include patterns
