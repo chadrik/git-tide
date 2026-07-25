@@ -589,7 +589,7 @@ def get_promotion_marker(remote: str | None = None) -> str | None:
     Args:
         remote: The remote repository name
     """
-    git("fetch", remote if remote else "--all", "refs/notes/*:refs/notes/*", quiet=True)
+    git("fetch", remote if remote else "--all", "+refs/notes/*:refs/notes/*", quiet=True)
 
     start_rev = "HEAD"
 
@@ -648,7 +648,7 @@ def set_promotion_marker(remote: str, branch: str) -> None:
         remote: The remote repository name
         branch: one of the registered gitflow branches
     """
-    git("fetch", remote, "refs/notes/*:refs/notes/*")
+    git("fetch", remote, "+refs/notes/*:refs/notes/*")
     # FIXME: forcing here, because the same commit can be the promotion base more than
     #  once.  should we skip?
     git("notes", "add", "--force", "-m", PROMOTION_BASE_MSG, branch)
