@@ -12,6 +12,7 @@ import pytest
 
 from tide.core import (
     get_modified_projects,
+    get_promotion_marker,
 )
 from tide.gitutils import (
     checkout_remote_branch,
@@ -292,3 +293,21 @@ def test_get_latest_commit_git_command_failure() -> None:
         mock_git.side_effect = subprocess.CalledProcessError(1, "git")
         with pytest.raises(subprocess.CalledProcessError):
             get_latest_commit(remote, branch_name)
+
+
+@pytest.mark.unit
+def test_get_promotion_marker_fetches_notes() -> None:
+    with patch("tide.core.git") as mock_git:
+        mock_git.return_value = ""
+        assert get_promotion_marker("origin") is None
+
+    mock_git.assert_any_call("fetch", "origin", "+refs/notes/*:refs/notes/*", quiet=True)
+
+
+@pytest.mark.unit
+def test_get_promotion_marker_without_fetch() -> None:
+    with patch("tide.core.git") as mock_git:
+        mock_git.return_value = ""
+        assert get_promotion_marker("origin", fetch=False) is None
+
+    assert not [args for args, _ in mock_git.call_args_list if args[0] == "fetch"]

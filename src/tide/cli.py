@@ -187,7 +187,20 @@ def init(
     "(those with a `[project].name` value)",
 )
 @click.option("--dry-run", is_flag=True, default=False)
-def autotag(annotation: str, base_rev: str | None, projects: list[str], dry_run: bool) -> None:
+@click.option(
+    "--fetch/--no-fetch",
+    default=True,
+    help="Whether to fetch the promotion marker notes from the remote. Use "
+    "--no-fetch to skip the fetch when it has already been performed up front, "
+    "e.g. to avoid concurrent fetches from parallel jobs.",
+)
+def autotag(
+    annotation: str,
+    base_rev: str | None,
+    projects: list[str],
+    dry_run: bool,
+    fetch: bool,
+) -> None:
     """Tag the current branch with a new version number.
 
     The new tag is pushed to the remote repository.
@@ -216,6 +229,7 @@ def autotag(annotation: str, base_rev: str | None, projects: list[str], dry_run:
                 remote=remote,
                 as_tag=True,
                 dry_run=False,
+                fetch=fetch,
             )
             # tag can be None if a branch has not yet received its first seed promotion.
             # for example: prior to beta being promoted to rc, there will not be any

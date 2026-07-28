@@ -530,6 +530,7 @@ def is_pending_bump(
     branch: str,
     remote: str | None = None,
     add_missing_promote_marker: bool = False,
+    fetch: bool = True,
 ) -> bool:
     """Return whether the given branch and folder combination are awaiting a minor bump.
 
@@ -539,6 +540,8 @@ def is_pending_bump(
         add_missing_promote_marker: if this is called prior to the first promotion
           of branches, setting this to True will cause a promotion marker to
           be set so that subsequent calls will not cause a minor version bump.
+        fetch: whether to fetch promotion marker notes from the remote. Set this
+          to False if the notes have already been fetched.
 
     Returns:
         whether it is pending or not
@@ -547,7 +550,7 @@ def is_pending_bump(
     if branch != exp_branch:
         return False
 
-    promotion_rev = get_promotion_marker(remote)
+    promotion_rev = get_promotion_marker(remote, fetch=fetch)
 
     if promotion_rev is None:
         if config.verbose:
@@ -555,7 +558,7 @@ def is_pending_bump(
         if add_missing_promote_marker:
             if remote is None:
                 raise ValueError("Must provide remote when setting add_missing_promote_marker=True")
-            set_promotion_marker(remote, current_rev("HEAD~1"))
+            set_promotion_marker(remote, current_rev("HEAD~1"), fetch=fetch)
         return True
     else:
         if config.verbose:
@@ -583,13 +586,16 @@ def is_pending_bump(
     return True
 
 
-def get_promotion_marker(remote: str | None = None) -> str | None:
+def get_promotion_marker(remote: str | None = None, fetch: bool = True) -> str | None:
     """Get the hash for the most recent promotion commit.
 
     Args:
         remote: The remote repository name
+        fetch: whether to fetch the notes holding promotion markers from the remote.
+          Set this to False if the notes have already been fetched.
     """
-    git("fetch", remote if remote else "--all", "+refs/notes/*:refs/notes/*", quiet=True)
+    if fetch:
+        git("fetch", remote if remote else "--all", "+refs/notes/*:refs/notes/*", quiet=True)
 
     start_rev = "HEAD"
 
@@ -636,7 +642,7 @@ def get_promotion_marker(remote: str | None = None) -> str | None:
         start_rev = f"{last_rev}^"
 
 
-def set_promotion_marker(remote: str, branch: str) -> None:
+def set_promotion_marker(remote: str, branch: str, fetch: bool = True) -> None:
     """Store a state for whether the given project on the given branch needs to have a minor bump.
 
     If it is true for a given branch, then get_next_tag() will return a minor increment.
@@ -647,8 +653,11 @@ def set_promotion_marker(remote: str, branch: str) -> None:
     Args:
         remote: The remote repository name
         branch: one of the registered gitflow branches
+        fetch: whether to fetch existing notes from the remote before adding the
+          marker. Set this to False if the notes have already been fetched.
     """
-    git("fetch", remote, "+refs/notes/*:refs/notes/*")
+    if fetch:
+        git("fetch", remote, "+refs/notes/*:refs/notes/*")
     # FIXME: forcing here, because the same commit can be the promotion base more than
     #  once.  should we skip?
     git("notes", "add", "--force", "-m", PROMOTION_BASE_MSG, branch)
@@ -799,6 +808,7 @@ def get_next_version(
     remote: str | None = None,
     as_tag: bool = False,
     dry_run: bool = True,
+    fetch: bool = True,
 ) -> str | None:
     """Return the next version for a given branch based on the latest changes.
 
@@ -811,6 +821,8 @@ def get_next_version(
         dry_run: if False, simply return the version or tag.  If True,
             also add missing promote markers, and return None if a branch has
             not yet received its first seed promotion.
+        fetch: whether to fetch promotion marker notes from the remote. Set this
+            to False if the notes have already been fetched.
 
     Returns:
         The next version or tag to be created
@@ -850,6 +862,7 @@ def get_next_version(
         branch,
         remote,
         add_missing_promote_marker=not dry_run,
+        fetch=fetch,
     )
 
     # Only apply minor increment the most experimental branch
