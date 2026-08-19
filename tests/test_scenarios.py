@@ -1101,6 +1101,89 @@ projectA-1.0.0           initial state"""
 
 
 @pytest.mark.unit
+def test_unreachable_tag_does_not_block_minor_bump(
+    setup_git_repo, monkeypatch, tmp_path_factory
+) -> None:
+    """Test that a tag on an unreachable commit does not block the minor bump after a promotion.
+
+    A tag becomes unreachable when a rebase or a force push rewrites the branch it was
+    created on. The commit it points at remains in the repository, but no branch reaches
+    it any more.
+
+    `is_pending_bump` looks for pre-release tags between the branch tip and the promotion
+    marker to decide whether a minor bump followed the last promotion. An unreachable tag
+    falls outside that range in both directions. It is therefore not evidence that the
+    minor bump already happened.
+    """
+    local_repo, config, remote_data = setup_git_repo
+    assert os.path.isdir(local_repo)
+    assert latest_tag("projectA-*") == "projectA-1.0.0"
+
+    ctx = Context(config, remote_data, tmp_path_factory, monkeypatch)
+
+    # -- commit and autotag
+    # (ProjectA) Add feature 1 to BETA branch
+    msg = f"{config.beta}: (projectA) add feature 1"
+    commit_file_and_push(config.beta, msg, folder="projectA")
+    with ctx.pipeline(
+        config.beta,
+        "(ProjectA) Add feature 1 to BETA branch",
+    ) as env:
+        run_autotag(env, remote_data)
+
+    assert latest_tag("projectA-*") == "projectA-1.1.0b0"
+
+    # -- commit and autotag, then rewrite the branch
+    # (ProjectA) Add feature 2 to BETA branch, and orphan it
+    msg = f"{config.beta}: (projectA) add feature 2"
+    commit_file_and_push(config.beta, msg, folder="projectA")
+    with ctx.pipeline(
+        config.beta,
+        "(ProjectA) Add feature 2 to BETA branch",
+    ) as env:
+        run_autotag(env, remote_data)
+
+    assert latest_tag("projectA-*") == "projectA-1.1.0b1"
+
+    # The branch is rewritten, e.g. by a force push after a rebase. projectA-1.1.0b1
+    # is left pointing at a commit that is no longer reachable from any branch.
+    git("checkout", config.beta)
+    orphaned_rev = current_rev()
+    git("reset", "--hard", "HEAD~1")
+    git("push", "--force", "origin", config.beta)
+
+    for branch in config.branches:
+        assert git("branch", "--contains", orphaned_rev, capture=True) == "", (
+            f"{orphaned_rev} should not be reachable from {branch}"
+        )
+    assert "projectA-1.1.0b1" in all_tags("projectA-*")
+
+    # -- promote
+    tag_args = [
+        {
+            "annotation": f"promoting {config.beta} to {config.rc}!",
+            "base_rev": None,
+            "branch": config.rc,
+        }
+    ]
+    ctx.run_promote_and_autotag_jobs(tag_args)
+
+    assert latest_tag("projectA-*") == "projectA-1.1.0rc0"
+
+    # -- commit and autotag
+    # The first commit of the new cycle must bump the minor version.
+    msg = f"{config.beta}: (projectA) add feature 3"
+    commit_file_and_push(config.beta, msg, folder="projectA")
+    with ctx.pipeline(
+        config.beta,
+        "(ProjectA) Add feature 3 to BETA branch",
+    ) as env:
+        run_autotag(env, remote_data)
+
+    assert latest_tag("projectA-*") == "projectA-1.2.0b0"
+
+
+@pytest.mark.unit
 @pytest.mark.branches({"stable": "main"})
 def test_dev_cycle_one_branch(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
     """Test the development cycle by mimicking typical operations in a CICD environment."""

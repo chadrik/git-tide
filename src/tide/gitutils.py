@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fnmatch
 import os.path
 import re
 import subprocess
@@ -105,27 +104,25 @@ def git(
 def get_tags(
     pattern: str | None = None, start_rev: str = "HEAD", end_rev: str | None = None
 ) -> list[str]:
-    """Return all of the tags in the Git repository.
+    """Return the tags in the Git repository which are reachable from a commit.
+
+    Tags on commits that are not reachable from `start_rev` are never returned.
+    A commit becomes unreachable when the branch it was made on is rewritten, for
+    example by a rebase or a force push, and any tag left behind on it belongs to
+    no branch and to no revision range.
 
     Args:
         pattern: glob pattern for tag names
         start_rev: list tags reachable from this commit
-        end_rev: list tags up until this commit
+        end_rev: exclude tags reachable from this commit
     """
-    args = ["log", "--tags", "--format=%D", start_rev]
+    args = ["tag", "--merged", start_rev]
     if end_rev:
-        args.extend(["--not", end_rev])
+        args.extend(["--no-merged", end_rev])
+    if pattern:
+        args.extend(["--list", pattern])
 
-    lines = git(*args, capture=True).splitlines()
-    tags = []
-    for line in lines:
-        parts = line.split(", ")
-        for part in parts:
-            if part.startswith("tag: "):
-                tag = part[5:]
-                if pattern is None or fnmatch.fnmatch(tag, pattern):
-                    tags.append(tag)
-    return tags
+    return git(*args, capture=True).splitlines()
 
 
 def get_branches() -> list[str]:
