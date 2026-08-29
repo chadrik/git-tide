@@ -1,6 +1,6 @@
 [project]
 name = "git-tide"
-version = "0.3.3"
+version = "1.0.0"
 description = "CLI for automated gitflow-style branching"
 authors = [
     {name="Chad Dombrova"},
@@ -50,7 +50,9 @@ disallow_untyped_defs = true
 [tool.pytest.ini_options]
 markers = [
     "smoke: mark a test as a smoke test",
-    "unit: mark a test as a unit test"
+    "unit: mark a test as a unit test",
+    "branches: override the gitflow branch names used by setup_git_repo",
+    "branching_mode: override the branching mode used by setup_git_repo"
 ]
 
 [tool.tide]
