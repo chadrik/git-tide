@@ -1,4 +1,4 @@
-"""Core gitflow logic: configuration, runtimes, backends, and promotion."""
+"""Core tide logic: configuration, runtimes, backends, and branching models."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import subprocess
+import time
 
 import click
 
@@ -24,9 +25,6 @@ from urllib.parse import urlparse, urlunparse
 from .gitutils import (
     GitRepo,
     branch_exists,
-    checkout_remote_branch,
-    current_rev,
-    get_tags,
     git,
     join,
 )
@@ -75,8 +73,10 @@ def _patched_run(cmd: str, env: Mapping[str, str] | None = None) -> commitizen.c
 
 
 def _patch_cz_run() -> None:
-    """commitizen.cmd.run uses shell=True, which can introduce inconsistency
-    based on user profiles, etc.
+    """Replace `commitizen.cmd.run` with a version that runs no shell.
+
+    `commitizen.cmd.run` sets shell=True. The shell reads the user's profile, so the
+    same command can behave differently for different users.
     """
     if os.environ.get("TIDE_PATCH_CZ_RUN", "0").lower() not in ["1", "true"]:
         return
@@ -89,7 +89,7 @@ def _patch_cz_run() -> None:
 
 
 class ReleaseID(str, Enum):
-    """Represents semver pre-releases, plus 'stable' (i.e. non-pre-release)."""
+    """A semver pre-release phase, plus 'stable' for a version that is not a pre-release."""
 
     alpha = "alpha"
     beta = "beta"
@@ -105,13 +105,23 @@ class ReleaseID(str, Enum):
         }[self.name]
 
 
+class BranchingMode(str, Enum):
+    """The set of rules tide follows for how versions advance and branches move.
+
+    A repository selects one mode. A project cannot select a mode of its own.
+    """
+
+    gitflow = "gitflow"
+    semantic_commit = "semantic_commit"
+
+
 def is_url(s: str) -> bool:
     """Return whether the string looks like a URL."""
     return "://" in s
 
 
 def load_config(path: str | None = None, verbose: bool = False) -> Config:
-    """Load and return the GitFlow configuration from the pyproject.toml file.
+    """Load the tide configuration from a pyproject.toml file.
 
     Returns:
         A configuration object
@@ -136,29 +146,72 @@ def load_config(path: str | None = None, verbose: bool = False) -> Config:
 
     config = Config(verbose=verbose)
 
+    mode = settings.get("branching_mode", BranchingMode.gitflow.value)
     try:
-        config.tag_format = settings["tag_format"]
-    except KeyError:
-        pass
+        config.branching_mode = BranchingMode(mode)
+    except ValueError:
+        valid = ", ".join(repr(m.value) for m in BranchingMode)
+        raise click.ClickException(
+            f"Invalid 'tool.{TOOL_NAME}.branching_mode' {mode!r}: must be one of {valid}: {path}"
+        )
 
-    # Loop through branches once and extract all needed information
+    for key in ("tag_format", "release_branch_format"):
+        try:
+            setattr(config, key, settings[key])
+        except KeyError:
+            pass
+
+    # Record each configured branch, from most experimental to stable.
     for release_id in ReleaseID:
         branch_name = branches.get(release_id.value)
         if branch_name is None:
             continue
 
-        # Append branch name to CONFIG.branches list
         config.branches.append(branch_name)
-
-        # Update CONFIG.branch_to_release_id dictionary
         config.branch_to_release_id[branch_name] = release_id
         setattr(config, release_id.value, branch_name)
+
+    if config.branching_mode is BranchingMode.semantic_commit:
+        _validate_semantic_commit_config(config, branches, path)
     return config
+
+
+def _validate_semantic_commit_config(config: Config, branches: dict, path: str) -> None:
+    """Reject configuration that has no meaning in semantic_commit mode.
+
+    Args:
+        config: the partially built configuration
+        branches: the raw `tool.tide.branches` table
+        path: path to the config file, used in error messages
+
+    Raises:
+        ClickException: if the configuration names a pre-release branch, or if
+            `release_branch_format` cannot be parsed back into a version line.
+    """
+    prerelease = [
+        release_id.value
+        for release_id in ReleaseID
+        if release_id is not ReleaseID.stable and branches.get(release_id.value)
+    ]
+    if prerelease:
+        raise click.ClickException(
+            f"'tool.{TOOL_NAME}.branches.{prerelease[0]}' is not supported in "
+            f"{BranchingMode.semantic_commit.value!r} branching mode: this mode is "
+            f"trunk-based, so only 'branches.stable' (the trunk) may be set: {path}"
+        )
+
+    for placeholder in ("$major", "$minor"):
+        if placeholder not in config.release_branch_format:
+            raise click.ClickException(
+                f"'tool.{TOOL_NAME}.release_branch_format' must contain {placeholder!r} "
+                f"so that release branches can be parsed back into a version line, "
+                f"got {config.release_branch_format!r}: {path}"
+            )
 
 
 @dataclass
 class Config:
-    """Gitflow branch configuration, as loaded from `tool.tide` in pyproject.toml."""
+    """The tide configuration, as loaded from `tool.tide` in pyproject.toml."""
 
     # mapping from id to branch name
     stable: str = "master"
@@ -171,13 +224,17 @@ class Config:
     # branch name to pre-release name (alpha, beta, rc). None for stable.
     branch_to_release_id: dict[str, ReleaseID] = field(default_factory=dict)
     verbose: bool = False
-    tag_format: str = "$version"
+    branching_mode: BranchingMode = BranchingMode.gitflow
+    # tide manages monorepos by default. Both formats contain $project, so that two
+    # projects never share a tag namespace or a branch namespace.
+    tag_format: str = "$project/$version"
+    release_branch_format: str = "$project/release-$major.$minor"
 
     def get_upstream_branch(self, branch: str) -> str | None:
-        """Determine the upstream branch for a given branch name based on configuration.
+        """Return the upstream branch of `branch`.
 
         Args:
-            branch: The name of the branch for which to find the upstream branch.
+            branch: The name of the branch to find the upstream branch of.
 
         Returns:
             The name of the upstream branch, or None if there is no upstream branch.
@@ -198,7 +255,7 @@ class Config:
     def most_experimental_branch(self) -> str | None:
         """Return the most experimental branch.
 
-        This branch corresponds to the earliest pre-release specified by the config.
+        This branch holds the earliest pre-release phase in the configuration.
         """
         if self.branches[0] == self.stable:
             return None
@@ -214,32 +271,31 @@ class Runtime:
 
     @abstractmethod
     def current_branch(self) -> str:
-        """Get the current git branch name.
+        """Return the name of the current git branch.
 
         Returns:
             The name of the current branch.
 
         Raises:
-            RuntimeError: If the current branch name is not obtainable
+            RuntimeError: if tide cannot determine the current branch.
         """
 
     @abstractmethod
     def get_base_rev(self) -> str:
-        """Get the git revision representing the repo state before the current pipeline.
+        """Return the git revision of the repository before the current pipeline.
 
-        This is the state of the repo before the changes that triggered the current
-        pipeline. The files changed after this revision will be used to determine which
-        project tags to increment.
+        This revision precedes the changes that started the current pipeline. tide
+        compares it against HEAD. The files that changed between the two revisions
+        decide which project tags to increment.
         """
 
     @abstractmethod
     def get_remote(self) -> str:
-        """Configure and retrieve the name of a Git remote for use in CI environments.
+        """Configure a git remote and return its name.
 
-        This function configures a Git remote using environment variables
-        that should be set in the GitLab CI/CD environment. It configures the git user credentials,
-        splits the repository URL to format it with the access token, and adds the remote to the
-        local git configuration.
+        An implementation reads the environment variables that its CI system sets. It
+        then sets the git user credentials, adds the access token to the repository
+        URL, and registers the remote with the local git configuration.
 
         Returns:
             The name of the configured remote
@@ -269,21 +325,19 @@ class Backend:
         git("push", *args, *opts)
 
     def init_local_repo(self, remote_name: str) -> None:
-        """Setup the local repository.
+        """Configure the local repository.
 
         Args:
             remote_name: name of the git remote, used to query the url
         """
-        # initialize the local repo
         git("fetch", remote_name, quiet=self.config.verbose)
 
         if self.config.verbose:
             git("branch", "-la")
             git("remote", "-v")
 
-        # setup branches.
-        # loop from stable to pre-release branches, bc we set all release_id branches to
-        # the location of stable
+        # Create the branches. Loop from stable to the pre-release branches, because
+        # every branch starts at the position of stable.
         for branch in reversed(self.config.branches):
             if branch_exists(branch):
                 if branch != self.config.stable:
@@ -301,14 +355,143 @@ class Backend:
                 self.push("--set-upstream", remote_name, branch, skip_ci=True)
 
     @abstractmethod
-    def init_remote_repo(self, remote_url: str, access_token: str, save_token: bool) -> None:
-        """Setup the remote repository.
+    def init_remote_repo(
+        self,
+        remote_url: str,
+        access_token: str,
+        save_token: bool,
+        model: BranchingModel,
+    ) -> None:
+        """Configure the remote repository.
 
         Args:
             remote_url: URL of the git remote
             access_token: token used to authenticate changes to the remote.
             save_token: whether to save `access_token` into the remote.
+            model: the branching model this repository follows. It decides which
+                branches the remote protects and whether a promotion schedule exists.
         """
+
+
+class BranchingModel:
+    """The rules a repository follows for how versions advance and branches move.
+
+    A repository selects one branching mode. The model for that mode makes every
+    decision that differs between modes. A model omits the operations that its mode
+    does not support, so no caller has to test the mode.
+    """
+
+    def __init__(self, config: Config):
+        self.config = config
+
+    @abstractmethod
+    def release_id(self, branch: str) -> ReleaseID:
+        """Return the ReleaseID of versions minted on `branch`.
+
+        Args:
+            branch: a branch that tide mints versions on.
+
+        Raises:
+            ClickException: if versions are never minted on `branch`.
+        """
+
+    @abstractmethod
+    def next_version(
+        self,
+        branch: str,
+        project_name: str,
+        remote: str | None = None,
+        as_tag: bool = False,
+        dry_run: bool = True,
+        fetch: bool = True,
+    ) -> str | None:
+        """Return the next version for `project_name` on `branch`.
+
+        Args:
+            branch: The name of the branch for which to generate the tag.
+            project_name: The name of the project, used to find the commitizen
+                configuration and the matching tags.
+            remote: The remote repository name.
+            as_tag: Whether to format the version based on tool.tide.tag_format.
+            dry_run: if True, make no changes to the repository.
+            fetch: whether to fetch from the remote.
+
+        Returns:
+            The next version or tag, or None if no version should be minted.
+        """
+
+    @abstractmethod
+    def autotag(
+        self,
+        runtime: Runtime,
+        backend: Backend,
+        annotation: str,
+        base_rev: str | None = None,
+        projects: tuple[str, ...] = (),
+        dry_run: bool = False,
+        fetch: bool = True,
+    ) -> None:
+        """Tag the current branch with a new version for each modified project."""
+
+    def validate(
+        self,
+        target_branch: str,
+        commits: list[Commit] | None = None,
+        remote: str | None = None,
+    ) -> None:
+        """Check the commits leading to HEAD against the rules of this mode.
+
+        Args:
+            target_branch: the branch the current changes are destined for.
+            commits: the commits to check, or None to let the model choose.
+            remote: the git remote, used to resolve branches with no local ref.
+
+        Raises:
+            ValidationError: if a rule is broken.
+        """
+
+    @abstractmethod
+    def protected_branch_patterns(self) -> list[str]:
+        """Return the branch names or wildcards that the remote must protect.
+
+        Protection does two things. It sets `CI_COMMIT_REF_PROTECTED`, which the tide
+        jobs test before they run. It also stops a developer from pushing to a branch
+        that tide maintains.
+
+        A mode that creates branches after `init` runs must protect them with a
+        wildcard, because their names do not exist yet.
+        """
+
+    @abstractmethod
+    def uses_promotion_schedule(self) -> bool:
+        """Whether the remote needs a scheduled job to drive `tide promote`."""
+
+    def hotfix(self, runtime: Runtime, backend: Backend) -> None:
+        """Merge hotfixes from a branch back to its upstream branch."""
+        raise self._unsupported("hotfix")
+
+    def promote(self, runtime: Runtime, backend: Backend) -> None:
+        """Promote changes through the branch hierarchy."""
+        raise self._unsupported("promote")
+
+    def _unsupported(self, command: str) -> click.ClickException:
+        return click.ClickException(
+            f"'{TOOL_NAME} {command}' is not supported in "
+            f"{self.config.branching_mode.value!r} branching mode"
+        )
+
+    def _create_tag(self, tag: str, annotation: str, branch: str, dry_run: bool) -> None:
+        """Create an annotated tag on HEAD."""
+        # NOTE: git records a time with a resolution of one second, the same as a unix
+        # timestamp. The delay gives each tag a distinct time, so that tags always sort
+        # in the order that tide creates them.
+        # https://stackoverflow.com/questions/28237043/what-is-the-resolution-of-gits-commit-date-or-author-date-timestamps
+        time.sleep(1.1)
+        click.echo(
+            f"Creating new tag '{tag}' on branch {branch}" + (" (dry_run=True)" if dry_run else "")
+        )
+        if not dry_run:
+            git("tag", "-a", tag, "-m", annotation)
 
 
 class GitlabRuntime(Runtime):
@@ -350,7 +533,7 @@ class GitlabBackend(Backend):
 
     @cache
     def _conn(self, base_url: str, access_token: str) -> gitlab.Gitlab:
-        """Get a cached gitlab connection object."""
+        """Return a cached gitlab connection object."""
         try:
             import gitlab
         except ImportError:
@@ -367,14 +550,20 @@ class GitlabBackend(Backend):
     def _find_promote_job(
         self, project: gitlab.v4.objects.Project
     ) -> gitlab.v4.objects.ProjectPipelineSchedule | None:
-        """Find the scheduled job that is used to trigger promotion."""
+        """Return the scheduled job that starts promotion, or None if it does not exist."""
         schedules = project.pipelineschedules.list(get_all=True)
         for schedule in schedules:
             if schedule.description == self.PROMOTION_SCHEDULED_JOB_NAME:
                 return schedule
         return None
 
-    def init_remote_repo(self, remote_url: str, access_token: str, save_token: bool) -> None:
+    def init_remote_repo(
+        self,
+        remote_url: str,
+        access_token: str,
+        save_token: bool,
+        model: BranchingModel,
+    ) -> None:
         try:
             import gitlab.const
             import gitlab.exceptions
@@ -389,7 +578,14 @@ class GitlabBackend(Backend):
         # separate 'https://gitlab.com/groupname/projectname' into
         # 'https://gitlab.com' and 'groupname/projectname'
         url = urlparse(remote_url)
-        base_url = urlunparse(url._replace(path=""))
+        # A remote url may carry credentials, e.g. 'https://oauth2:$TOKEN@gitlab.com/...',
+        # which is the form that Gitlab CI puts in CI_REPOSITORY_URL. These credentials
+        # authenticate git, not the REST API, which uses `access_token` instead.
+        # Credentials left in the base url add a second auth header to every API call.
+        netloc = url.hostname or ""
+        if url.port:
+            netloc = f"{netloc}:{url.port}"
+        base_url = urlunparse(url._replace(netloc=netloc, path=""))
         # remove leading "/"
         project_and_ns = url.path[1:]
 
@@ -418,7 +614,7 @@ class GitlabBackend(Backend):
             # FIXME: validate that ACCESS_TOKEN has been set at the project or group level
             pass
 
-        for branch in self.config.branches:
+        for branch in model.protected_branch_patterns():
             try:
                 p_branch = project.protectedbranches.get(branch)
             except gitlab.exceptions.GitlabGetError:
@@ -433,14 +629,13 @@ class GitlabBackend(Backend):
             else:
                 p_branch.allow_force_push = True
                 p_branch.save()
-        click.echo("Setup protected branches", err=True)
+        click.echo("Configured the protected branches", err=True)
 
         default_branch = self.config.most_experimental_branch() or self.config.stable
         gl.projects.update(project.id, {"default_branch": default_branch})
 
-        if not self._find_promote_job(project):
-            # this must happen after the branch has been created in the remote and initial
-            # commit pushed
+        if model.uses_promotion_schedule() and not self._find_promote_job(project):
+            # The remote must already have the branch and the first commit.
             schedule = project.pipelineschedules.create(
                 {
                     "ref": self.config.stable,
@@ -457,7 +652,7 @@ class GitlabBackend(Backend):
 
 
 class LocalRuntime(Runtime):
-    """Used for processes running in local git repos, not in CI."""
+    """Interact with a local git repo, outside of CI."""
 
     def current_branch(self) -> str:
         branch = git("branch", "--show-current", capture=True)
@@ -472,8 +667,8 @@ class LocalRuntime(Runtime):
             return "0000000000000000000000000000000000000000"
 
     def get_remote(self) -> str:
-        # FIXME: this should probably be configurable somehow, but it's a user pref
-        #  so it shouldn't live in pyproject.toml
+        # FIXME: make this configurable. It is a user preference, so it does not
+        #  belong in pyproject.toml.
         return "origin"
 
 
@@ -482,7 +677,7 @@ class TestGitlabRuntime(GitlabRuntime):
 
     @cache
     def _setup_remote(self, url: str) -> None:
-        # overridden to prevent adding the oath token to the remote url
+        # Overridden to keep the oauth token out of the remote url.
         git("config", "user.email", os.environ["GITLAB_USER_EMAIL"])
         git("config", "user.name", os.environ["GITLAB_USER_NAME"])
 
@@ -492,7 +687,7 @@ class TestGitlabBackend(GitlabBackend):
 
     @cache
     def _conn(self, base_url: str, access_token: str) -> gitlab.Gitlab:
-        # overridden to return a mocked Gitlab connection object.
+        # Overridden to return a mock Gitlab connection object.
         import unittest.mock
 
         return cast("gitlab.Gitlab", unittest.mock.MagicMock())
@@ -500,8 +695,8 @@ class TestGitlabBackend(GitlabBackend):
     def push(
         self, *args: str, variables: dict[str, str] | None = None, skip_ci: bool = False
     ) -> None:
-        # overridden to write variables to a json object rather than use push options
-        # which are not supported by local git repos.
+        # Overridden to write the variables to a json file. A local git repo does not
+        # support push options.
         if variables:
             json_file = os.path.join(os.environ["CI_REPOSITORY_URL"], "push-opts.json")
             click.echo(f"Writing local output to {json_file}", err=True)
@@ -512,156 +707,6 @@ class TestGitlabBackend(GitlabBackend):
                 json.dump(variables, f)
 
         git("push", *args)
-
-
-def cz(*args: str, folder: str | Path | None = None) -> str:
-    """Run commitizen in a subprocess."""
-    output = subprocess.check_output(
-        ["cz"] + list(args),
-        text=True,
-        cwd=folder,
-    )
-    return output.strip()
-
-
-def is_pending_bump(
-    config: Config,
-    provider: commitizen.providers.ScmProvider,
-    branch: str,
-    remote: str | None = None,
-    add_missing_promote_marker: bool = False,
-    fetch: bool = True,
-) -> bool:
-    """Return whether the given branch and folder combination are awaiting a minor bump.
-
-    Args:
-        remote: The remote repository name
-        branch: one of the registered gitflow branches
-        add_missing_promote_marker: if this is called prior to the first promotion
-          of branches, setting this to True will cause a promotion marker to
-          be set so that subsequent calls will not cause a minor version bump.
-        fetch: whether to fetch promotion marker notes from the remote. Set this
-          to False if the notes have already been fetched.
-
-    Returns:
-        whether it is pending or not
-    """
-    exp_branch = config.most_experimental_branch()
-    if branch != exp_branch:
-        return False
-
-    promotion_rev = get_promotion_marker(remote, fetch=fetch)
-
-    if promotion_rev is None:
-        if config.verbose:
-            click.echo("No promote marker found", err=True)
-        if add_missing_promote_marker:
-            if remote is None:
-                raise ValueError("Must provide remote when setting add_missing_promote_marker=True")
-            set_promotion_marker(remote, current_rev("HEAD~1"), fetch=fetch)
-        return True
-    else:
-        if config.verbose:
-            click.echo(f"Found promotion base rev: {promotion_rev}", err=True)
-
-    suffix = config.branch_to_release_id[exp_branch].prerelease_suffix()
-
-    def prerelease_match(ver: commitizen.version_schemes.VersionProtocol) -> bool:
-        if suffix is None:
-            # I think this should only happen when there is only a stable branch
-            return ver.prerelease is None
-        else:
-            return ver.prerelease is not None and ver.prerelease.startswith(suffix)
-
-    matcher = provider._tag_format_matcher()
-    # List any tags for this project folder between this branch and the promotion note
-    all_tags = get_tags(end_rev=promotion_rev)
-    for tag in all_tags:
-        ver = matcher(tag)
-        # If we find a matching tag and that tag corresponds to our expected branch
-        # then promotion has already occurred.
-        if ver is not None and prerelease_match(ver):
-            return False
-    # no tags found after promotion.  we're still pending.
-    return True
-
-
-def get_promotion_marker(remote: str | None = None, fetch: bool = True) -> str | None:
-    """Get the hash for the most recent promotion commit.
-
-    Args:
-        remote: The remote repository name
-        fetch: whether to fetch the notes holding promotion markers from the remote.
-          Set this to False if the notes have already been fetched.
-    """
-    if fetch:
-        git("fetch", remote if remote else "--all", "+refs/notes/*:refs/notes/*", quiet=True)
-
-    start_rev = "HEAD"
-
-    # Search the history in batches of 100 commits looking for the promotion marker.
-    while True:
-        # TODO: I *think* we could optimize out a "tail call" to `git` if we hit the beginning of
-        #  the history (which will always fail) by checking if our query returned fewer than 100
-        #  commits.
-        try:
-            output = git(
-                "log",
-                "--first-parent",
-                "--format=%H %N",
-                "-n100",
-                start_rev,
-                capture=True,
-            )
-        except subprocess.CalledProcessError:
-            # End of history or invalid ref
-            return None
-
-        if not output:
-            return None
-
-        lines = output.splitlines()
-        last_rev: str | None = None
-
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-
-            parts = line.split(maxsplit=1)
-            last_rev = parts[0]
-            if len(parts) == 1:
-                continue
-
-            if parts[1] == PROMOTION_BASE_MSG:
-                return last_rev
-
-        if not last_rev:
-            return None
-
-        start_rev = f"{last_rev}^"
-
-
-def set_promotion_marker(remote: str, branch: str, fetch: bool = True) -> None:
-    """Store a state for whether the given project on the given branch needs to have a minor bump.
-
-    If it is true for a given branch, then get_next_tag() will return a minor increment.
-    After this, autotag() will set the pending state to False until.
-
-    This pending state is reset to True after each promotion event.
-
-    Args:
-        remote: The remote repository name
-        branch: one of the registered gitflow branches
-        fetch: whether to fetch existing notes from the remote before adding the
-          marker. Set this to False if the notes have already been fetched.
-    """
-    if fetch:
-        git("fetch", remote, "+refs/notes/*:refs/notes/*")
-    # FIXME: forcing here, because the same commit can be the promotion base more than
-    #  once.  should we skip?
-    git("notes", "add", "--force", "-m", PROMOTION_BASE_MSG, branch)
-    git("push", remote, "refs/notes/*")
 
 
 class CommitizenContext(NamedTuple):
@@ -680,7 +725,7 @@ def _init_commitizen_context(config: Config, project_name: str) -> CommitizenCon
         project_name: The name of the project
 
     Returns:
-        A CommitizenContext containing cz_config, provider, and scheme
+        A CommitizenContext that holds the config, the provider, and the scheme
     """
     from commitizen.config.base_config import BaseConfig
     from commitizen.defaults import Settings
@@ -708,8 +753,8 @@ def get_current_version(config: Config, project_name: str, as_tag: bool = False)
     """Return the current version.
 
     Args:
-        project_name: The name of the project, used to look up the commitizen
-            configuration, and find matching tags
+        project_name: The name of the project, used to find the commitizen
+            configuration and the matching tags
         as_tag: Whether to format the version based on tool.tide.tag_format
 
     Returns:
@@ -740,7 +785,7 @@ def get_version_at_ref(
 
     Args:
         config: The tide configuration
-        project_name: The name of the project, used to look up tags
+        project_name: The name of the project, used to find the matching tags
         ref: The git ref (commit SHA, branch name, tag, etc.) to query
         as_tag: Whether to format the version based on tool.tide.tag_format
         release_id: Optional release ID to filter tags by release phase
@@ -776,8 +821,8 @@ def get_version_at_ref(
                 v for v in version_tag_map if v.pre is not None and v.pre[0] == phase_marker
             ]
 
-        # `version_tag_map` should already be filtered to the desired project, so we expect to
-        # find exactly one version matching the given release phase ID.
+        # `version_tag_map` holds only the tags of this project, so exactly one version
+        # must match the given release phase.
         if len(phase_versions) != 1:
             if phase_versions:
                 adjective = "Multiple"
@@ -792,7 +837,7 @@ def get_version_at_ref(
 
         matching_version = phase_versions[0]
     else:
-        # If no release phase is specified, we just want the "latest" version.
+        # Without a release phase, take the highest version.
         matching_version = sorted(version_tag_map)[-1]
 
     if as_tag:
@@ -801,98 +846,13 @@ def get_version_at_ref(
         return str(matching_version)
 
 
-def get_next_version(
-    config: Config,
-    branch: str,
-    project_name: str,
-    remote: str | None = None,
-    as_tag: bool = False,
-    dry_run: bool = True,
-    fetch: bool = True,
-) -> str | None:
-    """Return the next version for a given branch based on the latest changes.
-
-    Args:
-        remote: The remote repository name
-        branch: The name of the branch for which to generate the tag.
-        project_name: The name of the project, used to look up the commitizen
-            configuration, and find matching tags
-        as_tag: Whether to format the version based on tool.tide.tag_format
-        dry_run: if False, simply return the version or tag.  If True,
-            also add missing promote markers, and return None if a branch has
-            not yet received its first seed promotion.
-        fetch: whether to fetch promotion marker notes from the remote. Set this
-            to False if the notes have already been fetched.
-
-    Returns:
-        The next version or tag to be created
-    """
-    from commitizen import bump
-    from commitizen.version_schemes import Increment
-
-    try:
-        release_id = config.branch_to_release_id[branch]
-    except KeyError:
-        raise click.ClickException(
-            f"{branch} is not a valid release branch.  Must be one of {', '.join(config.branches)}"
-        )
-
-    cz_ctx = _init_commitizen_context(config, project_name)
-    current_version = cz_ctx.scheme(cz_ctx.provider.get_version())
-
-    if release_id != ReleaseID.stable:
-        prerelease = release_id.value
-        if (
-            not dry_run
-            and not current_version.prerelease
-            and branch != config.most_experimental_branch()
-        ):
-            # tag can be None if a branch has not yet received its first seed promotion.
-            # for example: prior to beta being promoted to rc, there will not be any
-            # rc tags, and we don't want to generate one until the first rc release
-            # comes into existence.
-            return None
-    else:
-        prerelease = None
-
-    # Find the closest promotion note to the current branch
-    pending_bump = is_pending_bump(
-        config,
-        cz_ctx.provider,
-        branch,
-        remote,
-        add_missing_promote_marker=not dry_run,
-        fetch=fetch,
-    )
-
-    # Only apply minor increment the most experimental branch
-    if pending_bump:
-        increment: Increment = "MINOR"
-        exact_increment = True
-    else:
-        increment = "PATCH"
-        exact_increment = False
-
-    new_version = current_version.bump(
-        increment,
-        prerelease=prerelease,
-        exact_increment=exact_increment,
-    )
-
-    return bump.normalize_tag(
-        new_version,
-        tag_format=cz_ctx.config.settings["tag_format"] if as_tag else "$version",
-        scheme=cz_ctx.scheme,
-    )
-
-
 def get_project_name(pyproject: Path) -> str | None:
     """Return the name of the project at the given path.
 
-    A project is a folder with a pyproject.toml file with a `[project].name`
+    A project is a folder with a pyproject.toml file that has a `[project].name`
     value or a `[tool.tide].project` value.
 
-    A project can opt-out by setting `[tool.tide].managed_project = false`
+    A project can exclude itself by setting `[tool.tide].managed_project = false`
     """
     if not pyproject.suffix == ".toml" and pyproject.is_dir():
         pyproject = pyproject.joinpath("pyproject.toml")
@@ -916,34 +876,52 @@ def get_project_name(pyproject: Path) -> str | None:
     return name
 
 
-def get_projects() -> list[tuple[Path, str]]:
-    """Get the list of projects within the repo.
+@lru_cache(maxsize=None)
+def get_projects() -> tuple[tuple[Path, str], ...]:
+    """Return every project within the repo.
 
-    A project is a folder with a pyproject.toml file with a `[project].name`
+    A project is a folder with a pyproject.toml file that has a `[project].name`
     value or a `[tool.tide].project` value.
 
-    A project can opt-out by setting `[tool.tide].managed_project = false`
+    A project can exclude itself by setting `[tool.tide].managed_project = false`
     """
     results = []
     repo = GitRepo(".")
     for path in repo.file_matches(include=("**/pyproject.toml",)):
         pyproject = Path(path)
+        if pyproject.parent != Path("."):
+            _assert_no_branching_mode(pyproject)
         project_name = get_project_name(pyproject)
         if project_name is not None:
             results.append((pyproject.parent, project_name))
-    return sorted(results)
+    return tuple(sorted(results))
+
+
+def _assert_no_branching_mode(pyproject: Path) -> None:
+    """Reject `branching_mode` set anywhere but the root config.
+
+    A repository has one branching mode. If a project could override the mode, two
+    projects could disagree about the meaning of the branches that they share.
+    """
+    with open(pyproject, "rb") as f:
+        data = tomllib.load(f)
+    if "branching_mode" in data.get("tool", {}).get(TOOL_NAME, {}):
+        raise click.ClickException(
+            f"'tool.{TOOL_NAME}.branching_mode' may only be set in the root "
+            f"pyproject.toml, not in a project: {pyproject}"
+        )
 
 
 def get_modified_projects(base_rev: str, verbose: bool = False) -> list[tuple[Path, str]]:
-    """Get the list of projects with changes files.
+    """Return every project that has a changed file.
 
-    A project is defined as a folder with a pyproject.toml file with a `tool.tide` section.
+    A project is a folder with a pyproject.toml file that has a `[project].name` value
+    or a `[tool.tide].project` value.
 
     Args:
         base_rev: The Git revision to compare against when identifying changed files
     """
-    # Compare the current commit with the branch you want to merge with:
-    # FIXME: do not included deleted files
+    # FIXME: do not include deleted files
     output = git("diff-tree", "--name-only", "-r", base_rev, "HEAD", capture=True)
     all_files = output.splitlines()
     if verbose:
@@ -959,14 +937,15 @@ def get_modified_projects(base_rev: str, verbose: bool = False) -> list[tuple[Pa
 def group_files_by_projects(
     files: Iterable[Path], project_dirs: Iterable[Path] | None = None
 ) -> dict[Path, list[Path]]:
-    """Given an iterable of files and project directories, return a mapping from
-    project directories to files made relative to those directories.
+    """Return a mapping of project directory to the files that belong to it.
+
+    Each returned file path is relative to its project directory.
     """
     from collections import defaultdict
 
     if project_dirs is None:
         project_dirs = dict(get_projects()).keys()
-    # find the deepest project that the file belongs to
+    # Sort the deepest directory first, so that a file joins the most specific project.
     project_dirs = list(reversed(sorted(project_dirs)))
 
     results: dict[Path, list[Path]] = defaultdict(list)
@@ -980,92 +959,123 @@ def group_files_by_projects(
 
 
 def get_projects_from_files(files: Iterable[Path]) -> list[tuple[Path, str]]:
-    """Given an iterable of files, return a list of (project path, package name) tuples."""
-    projects: list[tuple[Path, str]] = get_projects()
-    project_map = dict(projects)
+    """Return a (project path, project name) tuple for each project that owns one of `files`."""
+    project_map = dict(get_projects())
     results = group_files_by_projects(files, project_dirs=project_map)
     return [(project_dir, project_map[project_dir]) for project_dir in sorted(results)]
 
 
-def promote(config: Config, backend: Backend, runtime: Runtime) -> None:
-    """Promote changes through the branch hierarchy.
+class Commit(NamedTuple):
+    """A commit, its parents, and the files it touched.
 
-    e.g. from alpha -> beta -> rc -> stable.
+    A merge commit reports no files, so tide never attributes one to a project.
     """
-    remote = runtime.get_remote()
-    if config.verbose:
-        click.echo(f"remote = {remote}")
 
-    local_output = []
+    rev: str
+    parents: list[str]
+    message: str
+    files: list[Path]
 
-    def promote_branch(branch: str, log_msg_template: str) -> None:
-        """Promote a branch to its upstream branch.
+    @property
+    def is_merge(self) -> bool:
+        """Whether this commit merges another branch."""
+        return len(self.parents) > 1
 
-        - Checkout the branch
-        - Merge with the upstream branch, if it exists
-        - Push, skipping hotfixes
 
-        The branch is left checked out.
-        """
-        upstream_branch = config.get_upstream_branch(branch)
-        release_id = config.branch_to_release_id[branch]
-        log_msg = log_msg_template.format(
-            branch=branch, upstream_branch=upstream_branch, release_id=release_id.value
+def reachable_tags(rev: str = "HEAD") -> list[str]:
+    """Return every tag reachable from `rev`."""
+    return [
+        tag
+        for tag in git("tag", "--merged", rev, capture=True, quiet=True).splitlines()
+        if tag.strip()
+    ]
+
+
+def project_versions(
+    config: Config, project_name: str, rev: str = "HEAD"
+) -> dict[commitizen.version_schemes.VersionProtocol, str]:
+    """Return a mapping of version to tag for every tag of `project_name` reachable from `rev`."""
+    cz_ctx = _init_commitizen_context(config, project_name)
+    matcher = cz_ctx.provider._tag_format_matcher()
+    return {version: tag for tag in reachable_tags(rev) if (version := matcher(tag))}
+
+
+def get_commits(start: str | None, end: str = "HEAD") -> list[Commit]:
+    """Return the commits in `start..end`, newest first, with the files each touched.
+
+    Args:
+        start: exclusive lower bound, or None to walk the entire history.
+        end: inclusive upper bound.
+    """
+    rev_range = f"{start}..{end}" if start else end
+    try:
+        output = git(
+            "log",
+            "--format=%x1e%H%x1f%P%x1f%B%x1f",
+            "--name-only",
+            rev_range,
+            capture=True,
+            quiet=True,
         )
+    except subprocess.CalledProcessError:
+        return []
 
-        click.echo(f"Fetching {remote}/{branch}")
-        git("fetch", remote, branch)
+    commits = []
+    for record in output.split("\x1e"):
+        if not record.strip():
+            continue
+        parts = record.split("\x1f", 3)
+        if len(parts) < 3:
+            continue
+        rev, parents, message = parts[:3]
+        # A merge commit lists no files, so its record ends on the trailing separator.
+        # Python counts \x1f as whitespace. The strip() in git() therefore removes the
+        # separator from the last record, and the files segment is absent, not empty.
+        files = parts[3] if len(parts) == 4 else ""
+        commits.append(
+            Commit(
+                rev=rev.strip(),
+                parents=parents.split(),
+                message=message.strip(),
+                files=[Path(line) for line in files.splitlines() if line.strip()],
+            )
+        )
+    return commits
 
-        base_rev = checkout_remote_branch(remote, branch)
 
-        if upstream_branch:
-            git("fetch", remote, upstream_branch)
-            click.echo(f"Merging with upstream branch {remote}/{upstream_branch}")
-            git("merge", join(remote, upstream_branch), "-m", f"{log_msg}")
+def resolve_ref(branch: str, remote: str | None = None) -> str | None:
+    """Return a ref for `branch`, preferring the remote-tracking ref.
 
-        variables = {
-            f"{ENVVAR_PREFIX}_SKIP_HOTFIX": "true",
-            f"{ENVVAR_PREFIX}_AUTOTAG_ANNOTATION": log_msg,
-            f"{ENVVAR_PREFIX}_AUTOTAG_BASE_REV": base_rev,
-        }
+    A CI runner usually checks out a detached HEAD and has no local branches. The
+    remote-tracking ref then holds the true state of the branch.
+    """
+    candidates = [join(remote, branch)] if remote else []
+    candidates.append(branch)
+    for candidate in candidates:
+        if branch_exists(candidate):
+            return candidate
+    return None
 
-        # Trigger test/tag jobs for these new versions, but skip auto-hotfix
-        # --atomic means if there's a failure to push any of the refs, the entire
-        # operation will fail (like a databases).  May not be strictly necessary here.
-        click.echo("Pushing changes")
-        backend.push("--atomic", remote, branch, variables=variables)
 
-        # FIXME: switch to using push-opts.json
-        if isinstance(backend, TestGitlabBackend) and upstream_branch and base_rev != current_rev():
-            push_info = {
-                "annotation": log_msg,
-                "base_rev": base_rev,
-                "branch": branch,
-            }
-            local_output.append(push_info)
-            click.echo(f"Trigger: {json.dumps(push_info)}")
+def fetch_ref(branch: str, remote: str | None = None) -> str | None:
+    """Return a ref for `branch`, fetching it from `remote` if it is not present.
 
-    # Promotion time!
+    A CI runner usually holds only the revision that started the pipeline. tide must
+    fetch any other branch before it can resolve the branch.
 
-    # loop from stable to most experimental
-    for branch in reversed(config.branches):
-        # It doesn't matter what the active branch is when promote is run: the next thing
-        # that we do is checkout CONFIG.stable.
-        if branch == config.most_experimental_branch():
-            msg = PROMOTION_CYCLE_START_MESSAGE
-        else:
-            msg = PROMOTION_MESSAGE
-
-        promote_branch(branch, msg)
-
-    if local_output:
-        json_file = os.path.join(os.environ["CI_REPOSITORY_URL"], "push-data.json")
-        click.echo(f"Writing local output to {json_file}")
-        with open(json_file, "w") as f:
-            json.dump(local_output, f)
-
-    # Note: we do not make a tag on our cycle-start branch at this time. Instead, we wait
-    # for the first commit on the branch to do so.
-    experimental_branch = config.most_experimental_branch()
-    if experimental_branch:
-        set_promotion_marker(remote, experimental_branch)
+    Returns:
+        A usable ref, or None if `branch` does not exist locally or on the remote.
+    """
+    ref = resolve_ref(branch, remote)
+    if ref is not None or remote is None:
+        return ref
+    try:
+        git(
+            "fetch",
+            remote,
+            f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}",
+            quiet=True,
+        )
+    except subprocess.CalledProcessError:
+        return None
+    return resolve_ref(branch, remote)

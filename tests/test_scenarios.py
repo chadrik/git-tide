@@ -1,4 +1,96 @@
-"""End-to-end tests which simulate gitflow CI pipelines."""
+"""End-to-end tests which run the same scenarios against a simulated or a real CI.
+
+Every test here drives tide the way a CI pipeline would: a change lands on a branch, a
+job runs, and the resulting tags and branch positions are asserted. The scenarios are
+written once and executed in one of three modes.
+
+## Execution modes
+
+Selected by the ``EXEC_MODE`` environment variable:
+
+``local`` (the default)
+    No network. A bare git repo in a temp dir stands in for the remote, and the tide
+    commands run in-process against a second temp dir standing in for the runner
+    checkout. Fast, and the only mode that runs in CI for this repo itself.
+``remote``
+    A real Gitlab project on ``GITLAB_API_URL`` is created per test, and the jobs are
+    real Gitlab jobs on shared runners. Requires ``ACCESS_TOKEN``. Two minutes to forty
+    per test, dominated by runner queueing rather than by anything tide does.
+``gitlab-ci-local``
+    Runs the jobs from ``.gitlab-ci.yml`` in docker via the ``gitlab-ci-local`` tool.
+
+## Running the remote suite
+
+Tests are independent -- each builds its own Gitlab project and its own temp dirs -- so
+a remote run of the whole module is best done as one pytest process per test, in
+parallel. Raise ``KEEP_OLD_GITLAB_PROJECTS`` above the number of concurrent runs when
+doing so, or one test's teardown will delete a project another test is still using.
+
+The runner installs the working tree, not the installed tide: ``setup_git_repo`` copies
+``src`` (plus ``.gitignore``, ``.gitlab-ci.yml``, ``requirements.txt`` and ``README.md``)
+into the test repo and pushes it, and ``.tide-base`` does ``pip install -e .``. So a
+remote run tests uncommitted local changes. A new file *outside* ``src`` will not reach
+the runner unless it is added to ``files_to_copy``.
+
+## What only remote mode can catch
+
+The value of ``remote`` is that it exercises everything the simulation quietly does
+*for* tide: rules deciding whether a job runs at all, protection deciding whether a
+variable is exposed, and one pipeline per push. Each note below is a way a scenario
+passed locally while the same scenario was meaningless, or impossible, against
+gitlab.com.
+
+### Protection is what makes a job run at all
+
+Every tide job is gated on ``CI_COMMIT_REF_PROTECTED``, and ``tide init`` stores
+``ACCESS_TOKEN`` as a *protected* variable, so an unprotected branch gets neither the job
+nor a token to push with. This is invisible in local mode, where no rule is evaluated and
+every job is simply called as a function. Branches a mode creates after ``init`` has run
+-- release branches in semantic_commit mode -- must therefore be covered by a wildcard,
+which is what ``BranchingModel.protected_branch_patterns`` is for.
+
+### One push is one pipeline
+
+Local mode only runs a job where a test explicitly calls one, so a test can push an
+intermediate state and then amend it. Remote mode starts a real pipeline for *every*
+push, including the intermediate one, and that pipeline will happily mint a tag for the
+state the test was about to discard. Build a commit in one step and push it once; see the
+``folders`` argument of ``commit_file_and_push``.
+
+### A revision does not identify a pipeline
+
+In semantic_commit mode ``autotag`` pushes the tagged commit onto its release branch, so
+two branches point at the same sha and each gets its own ``auto-tag`` pipeline.
+``find_pipeline_job`` matches on branch as well as revision. It also has to accept a
+pipeline that has already finished: a job rejected by validation can fail before the
+first poll, and a search restricted to running pipelines would never see it.
+
+## Gitlab API quirks
+
+### Authentication comes from ACCESS_TOKEN alone
+
+``GitlabData.remote_url`` embeds the token in the origin url. Relying on the developer's
+git credential helper instead makes a run fail, or worse pass, for reasons that have
+nothing to do with the code.
+
+### Gitlab never reports a job's exit code
+
+The API exposes ``failure_reason``, which is just ``script_failure``, but tide's
+validation contract is one distinct exit code per broken rule.
+``GitlabData.job_exit_code`` recovers it by parsing the job log, which is the only place
+the runner writes it down.
+
+### Deleting a project is asynchronous
+
+It is renamed to ``<name>-deletion_scheduled-<id>`` and stays listed, so a second delete
+is a 400. The teardown skips those and never fails a passing test over one.
+
+## Expected noise
+
+Not a problem, but expect it in a job log: ``branch_exists`` probes with ``rev-parse
+--verify`` and ``git`` prints stderr on a non-zero exit even when ``quiet=True``, so a
+perfectly healthy run logs ``fatal: Needed a single revision``.
+"""
 
 from __future__ import annotations
 
@@ -29,6 +121,7 @@ import gitlab.const
 import gitlab.v4.objects
 import pytest
 
+from tide.branching.semantic import ValidationCode
 from tide.cli import set_config
 from tide.core import (
     ENVVAR_PREFIX,
@@ -59,7 +152,7 @@ else:
 
 # set this to reuse an existing Gitlab remote during testing
 FORCE_GITLAB_REMOTE = os.environ.get("FORCE_GITLAB_REMOTE")
-KEEP_OLD_GITLAB_PROJECTS = os.environ.get("KEEP_OLD_GITLAB_PROJECTS", 3)
+KEEP_OLD_GITLAB_PROJECTS = int(os.environ.get("KEEP_OLD_GITLAB_PROJECTS", 3))
 GITLAB_API_URL = "gitlab.com"
 
 HERE = os.path.dirname(__file__)
@@ -149,11 +242,25 @@ def gitlab_project():
         # cleanup old projects
         projects = gl.projects.list(owned=True, visibility=gitlab.const.Visibility.PRIVATE)
         # these are sorted from newest to oldest
-        projects = [project for project in projects if project.name.startswith("semver-demo-")]
+        projects = [
+            project
+            for project in projects
+            # Deletion is asynchronous: Gitlab renames a deleted project to
+            # '<name>-deletion_scheduled-<id>' and keeps listing it until it is really
+            # gone. Such a project is neither worth deleting again -- that is a 400 --
+            # nor worth keeping as one of the KEEP_OLD_GITLAB_PROJECTS kept for
+            # debugging, since it can no longer be browsed.
+            if project.name.startswith("semver-demo-")
+            and "-deletion_scheduled-" not in project.name
+        ]
         if len(projects) > KEEP_OLD_GITLAB_PROJECTS:
             for project in projects[KEEP_OLD_GITLAB_PROJECTS:]:
                 print(f"Cleaning up Gitlab project {project.name}")
-                project.delete()
+                try:
+                    project.delete()
+                except gitlab.exceptions.GitlabDeleteError as e:
+                    # never fail a passing test in teardown over a stale project
+                    print(f"Could not delete {project.name}: {e}")
 
 
 @dataclasses.dataclass
@@ -164,28 +271,41 @@ class GitlabData:
 
     @property
     def remote_url(self) -> str:
-        """HTTPS git url."""
-        return self.project.http_url_to_repo
+        """HTTPS git url, with the access token embedded.
+
+        The token is embedded so that a remote run authenticates from ACCESS_TOKEN alone,
+        rather than from whatever gitlab.com credential happens to sit in the developer's
+        credential helper. This is also the shape Gitlab CI itself uses for
+        CI_REPOSITORY_URL, so `GitlabRuntime._setup_remote` sees a realistic value.
+        """
+        url = urlparse(self.project.http_url_to_repo)
+        return urlunparse(url._replace(netloc=f"oauth2:{ACCESS_TOKEN}@{url.netloc}"))
 
     @staticmethod
     def wait_for_job(
         gitlab_project: gitlab.v4.objects.Project,
         gitlab_job: gitlab.v4.objects.ProjectJob,
-    ):
-        """Wait for the given job to complete.
+        check: bool = True,
+    ) -> gitlab.v4.objects.ProjectJob:
+        """Wait for the given job to complete, and return it in its final state.
 
         Args:
             gitlab_project: Project object from the gitlab python API
             gitlab_job: ProjectJob object from the gitlab python API
+            check: raise if the job does not succeed. Pass False when the job is
+                expected to fail, e.g. a release validation rejection, and read the
+                outcome from `job_exit_code` instead.
         """
         tries = 40
         while tries:
             print(f"{gitlab_job.name} status: {gitlab_job.status}")
             if gitlab_job.status == "success":
-                return
-            elif gitlab_job.status in ["failed", "skipped"]:
-                gitlab_job.pprint()
-                raise RuntimeError(f"Job {gitlab_job.status}")
+                return gitlab_job
+            elif gitlab_job.status in ["failed", "skipped", "canceled"]:
+                if check:
+                    gitlab_job.pprint()
+                    raise RuntimeError(f"Job {gitlab_job.status}")
+                return gitlab_job
             time.sleep(5.0)
             gitlab_job = gitlab_project.jobs.get(gitlab_job.id)
             tries -= 1
@@ -193,10 +313,35 @@ class GitlabData:
         raise RuntimeError("Job failed to complete")
 
     @staticmethod
+    def job_exit_code(gitlab_job: gitlab.v4.objects.ProjectJob) -> int:
+        """Return the exit status of the script a completed job ran.
+
+        Gitlab's API reports *why* a job failed (`failure_reason`) but never the exit
+        code, and tide's whole validation contract is one distinct exit code per broken
+        rule. The runner does write the code into the job log, so that is the only place
+        it can be recovered from.
+        """
+        if gitlab_job.status == "success":
+            return 0
+        trace = gitlab_job.trace().decode("utf-8", errors="replace")
+        # the runner writes e.g. "ERROR: Job failed: exit code 6" (docker executor) or
+        # "exit status 6" (shell executor) as the last line of the log.
+        match = re.search(r"Job failed: exit (?:code|status) (\d+)", trace)
+        if match:
+            return int(match.group(1))
+        print(trace[-4000:])
+        raise RuntimeError(
+            f"Could not determine exit code of job {gitlab_job.name} "
+            f"(status={gitlab_job.status}, failure_reason="
+            f"{getattr(gitlab_job, 'failure_reason', None)})"
+        )
+
+    @staticmethod
     def find_pipeline_job(
         gitlab_project: gitlab.v4.objects.Project,
         job_name_pattern: re.Pattern,
         rev: str | None = None,
+        ref: str | None = None,
         source: str | None = None,
         updated_after: datetime | None = None,
     ) -> gitlab.v4.objects.ProjectJob:
@@ -205,7 +350,14 @@ class GitlabData:
         Args:
             gitlab_project: Project object from the gitlab python API
             job_name_pattern: look for jobs whose name matches this regex
-            rev: look for jobs running on the given git revision
+            ref: look for jobs on the given branch. A revision alone is not enough to
+                identify a pipeline in semantic_commit mode: autotag pushes the tagged
+                commit onto its release branch, so two branches carry the same sha and
+                each gets its own auto-tag pipeline.
+            rev: look for jobs running on the given git revision. When given, a pipeline
+                that has already finished still matches: `rev` identifies the pipeline
+                precisely, so there is no risk of returning a job from an unrelated run,
+                and a job that fails fast can finish before the first poll.
             source: look for jobs triggered by this source event
             updated_after: look for jobs created or modified after this time
         """
@@ -218,11 +370,17 @@ class GitlabData:
             )
             non_match = defaultdict(list)
             for pipeline in pipelines:
-                if pipeline.status in ["success", "failed", "skipped"]:
+                if not rev and pipeline.status in ["success", "failed", "skipped"]:
                     non_match["status"].append((pipeline.id, pipeline.status))
                     continue
                 if rev and pipeline.sha != rev:
-                    non_match["rev"].append((pipeline.id, pipeline.rev))
+                    non_match["rev"].append((pipeline.id, pipeline.sha))
+                    continue
+                if ref and pipeline.ref != ref:
+                    non_match["ref"].append((pipeline.id, pipeline.ref))
+                    continue
+                if pipeline.status == "skipped":
+                    non_match["status"].append((pipeline.id, pipeline.status))
                     continue
 
                 jobs = pipeline.jobs.list(get_all=True)
@@ -237,14 +395,16 @@ class GitlabData:
         raise RuntimeError(f"Failed to find {source} job matching {job_name_pattern} for {rev}")
 
     @staticmethod
-    def gitlab_ci_local(job_name: str, runner_env: dict[str, str]):
+    def gitlab_ci_local(
+        job_name: str, runner_env: dict[str, str], check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
         options = []
         remote_path = runner_env["CI_REPOSITORY_URL"]
         options.extend(["--volume", f"{remote_path}:{remote_path}"])
         for varname, value in runner_env.items():
             options.extend(["--variable", f"{varname}={value}"])
         print(options)
-        subprocess.run(["gitlab-ci-local", job_name] + options, check=True)
+        return subprocess.run(["gitlab-ci-local", job_name] + options, text=True, check=check)
 
     @staticmethod
     def get_runner_env(
@@ -304,8 +464,17 @@ def setup_git_repo(
     This setup includes copying essential project files, creating an initial commit, and simulating
     an autotag process. It cleans up by removing the .git directory after tests are done.
     """
+    if "branching_mode" in request.keywords:
+        branching_mode = request.keywords["branching_mode"].args[0]
+    else:
+        branching_mode = "gitflow"
+    semantic = branching_mode == "semantic_commit"
+
     if "branches" in request.keywords:
         branches = request.keywords["branches"].args[0]
+    elif semantic:
+        # semantic_commit is trunk-based: only the trunk is configured
+        branches = {"stable": "main"}
     else:
         branches = {"beta": "develop", "rc": "staging", "stable": "master"}
 
@@ -333,13 +502,24 @@ def setup_git_repo(
         else:
             raise TypeError(src)
 
+    if semantic:
+        # this mode has no promote or hotfix job, and adds a validate job
+        shutil.copy(
+            parent_directory.joinpath(".gitlab-ci-semantic.yml"),
+            tmp_path.joinpath(".gitlab-ci.yml"),
+        )
+
     # Update the tide section of pyproject.toml
     lines = parent_directory.joinpath("pyproject.toml").read_text().splitlines(keepends=False)
     index = lines.index("[tool.tide]")
     pyproject = tmp_path.joinpath("pyproject.toml")
     lines = lines[: index + 1]
     lines.append("managed_project = false")
+    # Both modes pin the same tag format so that scenarios stay comparable. The
+    # $project-scoped defaults are covered by test_default_formats_isolate_projects.
     lines.append('tag_format = "$project-$version"')
+    if semantic:
+        lines.append(f'branching_mode = "{branching_mode}"')
     for release_id, branch in branches.items():
         lines.append(f'branches.{release_id} = "{branch}"')
     new_text = "\n".join(lines)
@@ -415,7 +595,7 @@ project = "{project}"
 
     # make initial tags
     for project in PROJECTS:
-        git("tag", "-a", f"{project}-1.0.0", "-m", message)
+        git("tag", "-a", project_tag(config, project, "1.0.0"), "-m", message)
         time.sleep(DELAY)
 
     if FORCE_GITLAB_REMOTE:
@@ -434,8 +614,22 @@ project = "{project}"
         remote_data.tempdir.cleanup()
 
 
+def project_tag(config: Config, project: str, version: str) -> str:
+    """Return the tag `project` would carry for `version` under the current config."""
+    return config.tag_format.replace("$project", project).replace("$version", version)
+
+
+def branch_rev(branch: str) -> str:
+    """Return the revision a branch points at."""
+    return git("rev-parse", branch, capture=True)
+
+
 def commit_file_and_push(
-    branch: str, message: str, folder: str | None = None, filename: str | None = None
+    branch: str,
+    message: str,
+    folder: str | None = None,
+    filename: str | None = None,
+    folders: tuple[str, ...] = (),
 ) -> None:
     """Create a file and commit it to the repository.
 
@@ -443,6 +637,10 @@ def commit_file_and_push(
         message: The commit message.
         folder: Sub-folder within the project. The folder should contain a pyproject.toml.
         filename: The name of the file to be created. If not provided, a UUID will be generated.
+        folders: Several sub-folders to touch in a *single* commit, for a change that
+            spans projects. Building such a commit by amending and force-pushing works
+            locally but not in remote mode, where the first push has already started a
+            pipeline that tags the intermediate state.
 
     Returns:
         None
@@ -451,12 +649,15 @@ def commit_file_and_push(
 
     if not filename:
         filename = str(uuid.uuid4())
-    if folder:
-        path = os.path.join(folder, filename)
+    if folders:
+        paths = [os.path.join(f, filename) for f in folders]
+    elif folder:
+        paths = [os.path.join(folder, filename)]
     else:
-        path = filename
+        paths = [filename]
 
-    Path(path).touch()
+    for path in paths:
+        Path(path).touch()
     git("add", ".")
     git("commit", "-m", message)
     git("push", "-f")
@@ -488,6 +689,7 @@ def get_tags_with_annotations() -> list[str]:
 
 
 def git_graph() -> str:
+    """Return the git graph string."""
     return git(
         "log",
         "--graph",
@@ -518,16 +720,18 @@ def verify_git_graph(expected_graph: str) -> None:
 
 
 @overload
-def _tide(*args: str, capture: Literal[True]) -> str:
+def _tide(*args: str, capture: Literal[True], check: bool = True) -> str:
     pass
 
 
 @overload
-def _tide(*args: str) -> subprocess.CompletedProcess[str]:
+def _tide(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     pass
 
 
-def _tide(*args: str, capture: bool = False) -> str | subprocess.CompletedProcess[str]:
+def _tide(
+    *args: str, capture: bool = False, check: bool = True
+) -> str | subprocess.CompletedProcess[str]:
     cmd = [
         sys.executable,
         "-m",
@@ -537,31 +741,67 @@ def _tide(*args: str, capture: bool = False) -> str | subprocess.CompletedProces
         cmd.append("--verbose")
     cmd.extend(args)
     if capture:
-        output = subprocess.run(cmd, check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+        output = subprocess.run(cmd, check=check, text=True, stdout=subprocess.PIPE).stdout.strip()
         print(output)
         return output
     else:
-        return subprocess.run(cmd, text=True, check=True)
+        return subprocess.run(cmd, text=True, check=check)
 
 
 def get_version_at_ref(path: str, ref: str) -> str:
     return _tide("version", "--path", path, "--at-ref", ref, capture=True)
 
 
+@overload
+def run_autotag(
+    runner_env,
+    remote_data: LocalData,
+    *,
+    annotation: str | None = None,
+    base_rev: str | None = None,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    pass
+
+
+@overload
+def run_autotag(
+    runner_env,
+    remote_data: GitlabData,
+    *,
+    annotation: str | None = None,
+    base_rev: str | None = None,
+    wait: Literal[False],
+    check: bool = True,
+) -> gitlab.v4.objects.ProjectJob:
+    pass
+
+
 def run_autotag(
     runner_env,
     remote_data: GitlabData | LocalData,
+    *,
     annotation: str | None = None,
     base_rev: str | None = None,
     wait: bool = True,
-) -> gitlab.v4.objects.ProjectJob | None:
+    check: bool = True,
+) -> gitlab.v4.objects.ProjectJob | subprocess.CompletedProcess[str]:
     """Trigger the 'autotag' command to automatically generate a new git tag.
 
     Args:
         runner_env: dict of env vars used to setup the runner env
         remote_data: Dataclass corresponding to the remote being used
         annotation: A custom annotation message for the git tag. Defaults to "automatic change detected".
-        wait: block until the Gitlab job completes.
+        wait: block until the Gitlab job completes. When False the raw Gitlab job is
+            returned so that several pipelines can be awaited together.
+        check: raise if autotag exits non-zero. Pass False to assert on the exit code
+            of a run that is expected to be rejected by release validation.
+
+    Returns:
+        A CompletedProcess whose returncode is the exit status of `tide autotag`,
+        in either execution mode, so that a test can assert on a ValidationCode without
+        caring where the job ran. When `wait` is False in remote mode, the pending
+        Gitlab job is returned instead.
 
     This function runs a command that automates the process of tagging the current commit in the git repository.
     """
@@ -574,22 +814,30 @@ def run_autotag(
         job = remote_data.find_pipeline_job(
             remote_data.project,
             re.compile(r"^auto-tag$"),
+            # the revision pins the search to the pipeline for the commit just pushed,
+            # which also lets a job that fails before the first poll still be found.
+            rev=runner_env["CI_COMMIT_SHA"],
+            ref=runner_env["CI_COMMIT_BRANCH"],
             source="push",
             updated_after=datetime.strptime(
                 remote_data.project.updated_at, "%Y-%m-%dT%H:%M:%S.%f%z"
             ),
         )
-        if wait:
-            remote_data.wait_for_job(remote_data.project, job)
+        if not wait:
+            return job
+        job = remote_data.wait_for_job(remote_data.project, job, check=check)
         print("autotag job done")
-        return job
+        return subprocess.CompletedProcess(
+            args=["tide", "autotag"], returncode=remote_data.job_exit_code(job)
+        )
     else:
         if EXEC_MODE == "gitlab-ci-local":
             # FIXME: use the push-opts file created by backend.push() to more accurately
             #  simulate the flow of variables between jobs
-            GitlabData.gitlab_ci_local(
+            return GitlabData.gitlab_ci_local(
                 "auto-tag",
                 runner_env | {f"{ENVVAR_PREFIX}_AUTOTAG_ANNOTATION": annotation},
+                check=check,
             )
         else:
             time.sleep(DELAY)
@@ -599,7 +847,7 @@ def run_autotag(
             ]
             if base_rev:
                 args.extend(["--base-rev", base_rev])
-            _tide(*args)
+            return _tide(*args, check=check)
 
 
 def run_promote(
@@ -650,7 +898,9 @@ def run_promote(
         return tag_args
 
 
-def run_hotfix(runner_env, remote_data: GitlabData | LocalData) -> None:
+def run_hotfix(
+    runner_env, remote_data: GitlabData | LocalData
+) -> subprocess.CompletedProcess[str] | None:
     """Trigger the 'hotfix' command to handle hotfix operations without affecting minor version increments.
 
     Args:
@@ -672,7 +922,7 @@ def run_hotfix(runner_env, remote_data: GitlabData | LocalData) -> None:
             GitlabData.gitlab_ci_local(job_name, runner_env)
         else:
             time.sleep(DELAY)
-            _tide("hotfix")
+            return _tide("hotfix")
 
 
 def setup_runner_env(monkeypatch, env: dict[str, str]):
@@ -725,7 +975,8 @@ class Context:
 
         if isinstance(self.remote_data, LocalData):
             setup_runner_env(self.monkeypatch, runner_env)
-            tmpdir: Path = self.tmp_path_factory.mktemp(branch)
+            # release branch names contain "/", which mktemp rejects as a basename
+            tmpdir: Path = self.tmp_path_factory.mktemp(branch.replace("/", "_"))
             print("created temporary directory", tmpdir)
 
             os.chdir(tmpdir)
@@ -1291,3 +1542,203 @@ def test_dev_cycle_pre_promotion(setup_git_repo, monkeypatch, tmp_path_factory) 
     * initial state -  (tag: projectB-1.0.0, tag: projectA-1.0.0)
     """
     verify_git_graph(expected)
+
+
+# ---------------------------------------------------------------------------
+# semantic_commit mode
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.branching_mode("semantic_commit")
+def test_semantic_dev_cycle(setup_git_repo, monkeypatch, tmp_path_factory) -> None:
+    """Walk a trunk-based cycle: open a line, patch it, diverge it, open the next.
+
+    Covers the whole ownership story: the trunk opens a version line and owns it while
+    the release branch fast-forwards behind it, a merge request against the release
+    branch takes ownership away, and the trunk is then refused that line until a feat
+    opens a new one.
+    """
+    local_repo, config, remote_data = setup_git_repo
+    trunk = config.stable
+    assert trunk == "main"
+    assert latest_tag("projectA-*") == "projectA-1.0.0"
+
+    ctx = Context(config, remote_data, tmp_path_factory, monkeypatch)
+
+    # -- a feat on the trunk opens the 1.1 line and cuts its release branch
+    commit_file_and_push(trunk, "feat: (projectA) add feature 1", folder="projectA")
+    with ctx.pipeline(trunk, "(projectA) feat on trunk") as env:
+        run_autotag(env, remote_data)
+
+    assert latest_tag("projectA-*") == "projectA-1.1.0"
+    # projectB was untouched, so it is not tagged at all
+    assert all_tags("projectB-*") == ["projectB-1.0.0"]
+    assert branch_rev("origin/projectA/release-1.1") == branch_rev(f"origin/{trunk}")
+
+    # -- a fix on the trunk mints a patch and fast-forwards the release branch
+    commit_file_and_push(trunk, "fix: (projectA) fix a crash", folder="projectA")
+    with ctx.pipeline(trunk, "(projectA) fix on trunk") as env:
+        run_autotag(env, remote_data)
+
+    assert latest_tag("projectA-*") == "projectA-1.1.1"
+    assert branch_rev("origin/projectA/release-1.1") == branch_rev(f"origin/{trunk}")
+
+    expected = rf"""
+    * fix: (projectA) fix a crash -  (HEAD -> {trunk}, tag: projectA-1.1.1, origin/projectA/release-1.1, origin/{trunk})
+    * feat: (projectA) add feature 1 -  (tag: projectA-1.1.0)
+    * initial state -  (tag: projectB-1.0.0, tag: projectA-1.0.0)"""
+    verify_git_graph(expected)
+
+    # -- a merge request against the release branch diverges it, taking ownership
+    #    of the 1.1 line away from the trunk
+    release_branch = "projectA/release-1.1"
+    commit_file_and_push(release_branch, "fix: (projectA) backported fix", folder="projectA")
+    with ctx.pipeline(release_branch, "(projectA) fix on release branch") as env:
+        run_autotag(env, remote_data)
+
+    assert latest_tag("projectA-*") == "projectA-1.1.2"
+    # the patch lives only on the release branch, never on the trunk
+    assert branch_rev("origin/projectA/release-1.1") != branch_rev(f"origin/{trunk}")
+
+    # -- the trunk may no longer mint into the 1.1 line
+    commit_file_and_push(trunk, "fix: (projectA) another crash", folder="projectA")
+    with ctx.pipeline(trunk, "(projectA) blocked fix on trunk") as env:
+        proc = run_autotag(env, remote_data, check=False)
+    assert proc.returncode == ValidationCode.trunk_line_diverged
+    assert latest_tag("projectA-*") == "projectA-1.1.2"
+
+    # -- upgrading to a feat opens the 1.2 line, which nothing else owns
+    commit_file_and_push(trunk, "feat: (projectA) add feature 2", folder="projectA")
+    with ctx.pipeline(trunk, "(projectA) feat on trunk") as env:
+        run_autotag(env, remote_data)
+
+    assert latest_tag("projectA-*") == "projectA-1.2.0"
+    assert branch_rev("origin/projectA/release-1.2") == branch_rev(f"origin/{trunk}")
+    # the diverged branch is left exactly where it was
+    assert "projectA-1.1.2" in all_tags("projectA-*")
+
+    # -- one trunk commit spanning both projects bumps both with the same signal
+    commit_file_and_push(
+        trunk,
+        "fix: (both) shared fix",
+        filename="shared",
+        folders=("projectA", "projectB"),
+    )
+    with ctx.pipeline(trunk, "(both) shared fix on trunk") as env:
+        run_autotag(env, remote_data)
+
+    assert latest_tag("projectA-*") == "projectA-1.2.1"
+    assert latest_tag("projectB-*") == "projectB-1.0.1"
+
+
+@pytest.mark.unit
+@pytest.mark.branching_mode("semantic_commit")
+def test_semantic_release_branch_rejects_bad_changes(
+    setup_git_repo, monkeypatch, tmp_path_factory
+) -> None:
+    """A release branch is bound to one project and one version line.
+
+    Each case lands a change on the release branch and runs its release pipeline.
+    Validation runs as part of autotag, and every rule reports its own exit code so a
+    CI configuration can tell them apart.
+    """
+    local_repo, config, remote_data = setup_git_repo
+    trunk = config.stable
+    ctx = Context(config, remote_data, tmp_path_factory, monkeypatch)
+
+    # open the 1.1 line so there is a release branch to land on
+    commit_file_and_push(trunk, "feat: (projectA) add feature 1", folder="projectA")
+    with ctx.pipeline(trunk, "(projectA) feat on trunk") as env:
+        run_autotag(env, remote_data)
+
+    release_branch = "projectA/release-1.1"
+    good_rev = branch_rev(f"origin/{release_branch}")
+
+    def land(message: str, *paths: str) -> subprocess.CompletedProcess[str]:
+        """Rewind the release branch, land one commit touching `paths`, run its pipeline.
+
+        Each case starts from the same known-good revision so that a change rejected by
+        one rule cannot leak into the next case and trip a different rule.
+        """
+        git("push", "-f", "origin", f"{good_rev}:refs/heads/{release_branch}")
+        git("fetch", "origin", quiet=True)
+        git("checkout", "-B", release_branch, f"origin/{release_branch}")
+        for path in paths:
+            Path(path).touch()
+        git("add", ".")
+        git("commit", "-m", message)
+        git("push", "-f")
+        with ctx.pipeline(release_branch, message) as env:
+            return run_autotag(env, remote_data, check=False)
+
+    # -- a feat may not land on a release branch: it would open a new line
+    proc = land("feat: (projectA) a new feature", "projectA/feat")
+    assert proc.returncode == ValidationCode.non_patch_on_release_branch
+
+    # -- a commit touching another project may not land on this release branch
+    proc = land("fix: (projectB) wrong project", "projectB/wrong")
+    assert proc.returncode == ValidationCode.wrong_project
+
+    # -- a single commit may not span projects on a release branch
+    proc = land("fix: (both) spans two projects", "projectA/multi", "projectB/multi")
+    assert proc.returncode == ValidationCode.multi_project_commit
+
+    # -- a well formed patch is accepted, and mints on the branch's own line
+    proc = land("fix: (projectA) a legitimate backport", "projectA/backport")
+    assert proc.returncode == 0
+    assert latest_tag("projectA-*") == "projectA-1.1.1"
+
+
+@pytest.mark.unit
+@pytest.mark.branching_mode("semantic_commit")
+def test_semantic_rejects_trunk_merged_into_release_branch(
+    setup_git_repo, monkeypatch, tmp_path_factory
+) -> None:
+    """Merging the trunk into a release branch drags in lines the branch does not own."""
+    local_repo, config, remote_data = setup_git_repo
+    trunk = config.stable
+    ctx = Context(config, remote_data, tmp_path_factory, monkeypatch)
+
+    commit_file_and_push(trunk, "feat: (projectA) add feature 1", folder="projectA")
+    with ctx.pipeline(trunk, "(projectA) feat on trunk") as env:
+        run_autotag(env, remote_data)
+    release_branch = "projectA/release-1.1"
+
+    # move the trunk on to a new version line
+    commit_file_and_push(trunk, "feat: (projectA) add feature 2", folder="projectA")
+    with ctx.pipeline(trunk, "(projectA) second feat on trunk") as env:
+        run_autotag(env, remote_data)
+
+    # a change that absorbs the trunk into the release branch
+    git("fetch", "origin", quiet=True)
+    git("checkout", "-B", release_branch, f"origin/{release_branch}")
+    git("merge", f"origin/{trunk}", "--no-ff", "-m", "merge the trunk in")
+    git("push", "-f")
+    with ctx.pipeline(release_branch, "trunk merged into release branch") as env:
+        proc = run_autotag(env, remote_data, check=False)
+    assert proc.returncode == ValidationCode.trunk_merged_into_release_branch
+
+
+@pytest.mark.unit
+@pytest.mark.branching_mode("semantic_commit")
+def test_semantic_new_project_starts_at_initial_version(
+    setup_git_repo, monkeypatch, tmp_path_factory
+) -> None:
+    """A project with no tags starts at 0.1.0, never at 0.0.x, so release-0.0 cannot exist."""
+    local_repo, config, remote_data = setup_git_repo
+    trunk = config.stable
+    ctx = Context(config, remote_data, tmp_path_factory, monkeypatch)
+
+    git("checkout", trunk)
+    Path("projectC").mkdir(exist_ok=True)
+    Path("projectC/pyproject.toml").write_text('[tool.tide]\nproject = "projectC"\n')
+    git("add", ".")
+    git("commit", "-m", "feat: (projectC) a brand new project")
+    git("push", "-f")
+
+    with ctx.pipeline(trunk, "(projectC) new project on trunk") as env:
+        run_autotag(env, remote_data)
+
+    assert all_tags("projectC-*") == ["projectC-0.1.0"]
+    assert branch_rev("origin/projectC/release-0.1") == branch_rev(f"origin/{trunk}")
