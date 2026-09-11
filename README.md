@@ -18,7 +18,7 @@ Projects within a single repository are independently versioned. A project is a 
 
 ### Automatic semantic versioning
 
-No need to manually bump the version in a file, `tide` determines the version through tag history during release.  This avoids the need to explicitly commit the version change, which adds immense flexibility in developer workflows: merge requests can be reordered and merge conflicts are avoided.
+`tide` determines the next version through tag history during release.  This avoids the need to explicitly commit the version change, which adds immense flexibility in developer workflows: merge requests can be reordered and merge conflicts are avoided.
 
 ## Gitflow mode
 
@@ -168,19 +168,17 @@ mode.
 
 ### Release branches
 
-When the minor or the major version of a project changes, `tide` opens a new
-**version line**. It also creates a **release branch** that owns the line, e.g.
-`release-1.1`. 
+When the minor or the major version of a project changes, `tide` creates a **release branch** e.g. `release-1.1`. 
 
 > Note: You can specify the branch formatting with `release_branch_format`.
 
-While the trunk owns a line, add your patches on the trunk. `tide` then fast-forwards
+The release branch always coincides with the trunk when it is first created, and new pull requests should target the trunk by default. `tide` then fast-forwards
 the release branch to follow. One atomic push moves the tag and the branch together, so
 the two can never disagree.
 
-A merge request that targets a release branch makes that branch **diverge** from the
-trunk. Ownership of the version line then transfers to the release branch, and the trunk can no
-longer add a patch version on that line. An attempt to do so produces an error that explains both
+If you need to perform maintenance on a past release, your pull request should target the desired release branch.  Once merged, commits targeting a release branch makes that branch **diverge** from the
+trunk. Ownership of the version line then conceptually transfers to the release branch, and the trunk can no
+longer receive a patch version on that line. An attempt to do so produces an error that explains both
 remedies: retarget the change at the release branch, or change the commit type to
 `feat:` to open a new version line.
 
@@ -193,7 +191,7 @@ branch.
 
 ```mermaid
 gitGraph
-   commit id: "feat!: rename keys" tag: "v1.0.0" tag: "release-1.0"
+   commit id: "feat!: rename keys" tag: "release-1.0" tag: "v1.0.0"
 ```
 
 The trunk (`main`) owns the `1.0` version line.  The `release-1.0` branch coincides with `main`.
@@ -205,9 +203,9 @@ The trunk (`main`) owns the `1.0` version line.  The `release-1.0` branch coinci
 
 ```mermaid
 gitGraph
-   commit id: "feat!: rename keys" tag: "v1.0.0" tag: "release-1.0"
+   commit id: "feat!: rename keys" tag: "release-1.0" tag: "v1.0.0"
    commit id: "feat: filters" tag: "v1.1.0"
-   commit id: "fix: escape query" tag: "v1.1.1" tag: "release-1.1"
+   commit id: "fix: escape query" tag: "release-1.1" tag: "v1.1.1"
 ```
 
 `feat: filters` bumps the minor version, so `tide` creates branch `release-1.1`. `fix: escape query` then lands on the trunk and tags `v1.1.1`, and `tide` fast-forwards the release branch to follow.
@@ -221,7 +219,7 @@ gitGraph
    commit id: "fix: escape query (cherry-pick)" tag: "v1.0.1"
    checkout main
    commit id: "feat: filters" tag: "v1.1.0"
-   commit id: "fix: escape query" tag: "v1.1.1" tag: "release-1.1"
+   commit id: "fix: escape query" tag: "release-1.1" tag: "v1.1.1"
 ```
 
 It is determined that `fix: escape query` needs to be backported to the `1.0` line, so a merge request is created targeting `release-1.0` and eventually merged.
@@ -240,9 +238,9 @@ gitGraph
    commit id: "fix: escape query (cherry-pick)" tag: "v1.0.1"
    checkout main
    commit id: "feat: filters" tag: "v1.1.0"
-   commit id: "fix: escape query" tag: "v1.1.1" tag: "release-1.1"
+   commit id: "fix: escape query" tag: "release-1.1" tag: "v1.1.1"
    checkout main
-   commit id: "feat: sorting" tag: "v1.2.0"
+   commit id: "feat: sorting" tag: "release-1.2" tag: "v1.2.0"
 ```
 
 `feat: sorting` lands on the trunk and creates `release-1.2`.
@@ -261,7 +259,7 @@ gitGraph
    branch release-1.1
    commit id: "fix: recombobulate" tag: "v1.1.2"
    checkout main
-   commit id: "feat: sorting" tag: "v1.2.0"
+   commit id: "feat: sorting" tag: "release-1.2" tag: "v1.2.0"
 ```
 
 Finally, to demonstrate the recurring pattern, a fix is added to `release-1.1` which causes it to diverge from the trunk.
