@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import os
-import re
-import subprocess
 import sys
-import time
 from pathlib import Path
 
 import click
 
+from .branching.gitflow import GitflowModel
+from .branching.semantic import SemanticCommitModel
 from .core import (
     ENVVAR_PREFIX,
-    HOTFIX_MESSAGE,
     Backend,
+    BranchingMode,
+    BranchingModel,
     Config,
     GitlabBackend,
     GitlabRuntime,
@@ -22,23 +22,17 @@ from .core import (
     Runtime,
     TestGitlabBackend,
     TestGitlabRuntime,
+    get_commits,
     get_current_version,
     get_modified_projects,
-    get_next_version,
     get_project_name,
     get_projects,
     get_version_at_ref,
     is_url,
     load_config,
 )
-from .core import (
-    promote as _promote,
-)
 from .gitutils import (
-    checkout_remote_branch,
-    current_rev,
     git,
-    print_git_graph,
     set_git_verbose,
 )
 
@@ -55,19 +49,27 @@ def set_config(config: Config) -> Config:
 
 
 def get_backend(url: str | None = None) -> Backend:
-    """Return a Backend corresponding to where the current python process is pushing/pulling."""
+    """Return the Backend for the remote that this process pushes to and pulls from."""
     if os.environ.get("GITLAB_CI", "false") == "true" or (url and "gitlab" in url):
         return GitlabBackend(CONFIG)
     else:
         return TestGitlabBackend(CONFIG)
 
 
+def get_branching_model() -> BranchingModel:
+    """Return the BranchingModel for the branching mode that this repository selects."""
+    if CONFIG.branching_mode is BranchingMode.semantic_commit:
+        return SemanticCommitModel(CONFIG)
+    else:
+        return GitflowModel(CONFIG)
+
+
 def get_runtime() -> Runtime:
-    """Return a Runtime corresponding to where the current python process is *running*."""
+    """Return the Runtime for the environment that this process runs in."""
     if os.environ.get("GITLAB_CI", "false") == "true":
         return GitlabRuntime(CONFIG)
-    # gitlab-ci-local and our unittests set this to false as an inidicator that
-    # we are testing gitlab, but not IN gitlab.
+    # gitlab-ci-local and the unit tests set this to "false". It means that the test
+    # targets gitlab, but does not run inside gitlab.
     elif os.environ.get("GITLAB_CI") == "false":
         return TestGitlabRuntime(CONFIG)
     else:
@@ -89,7 +91,7 @@ def cli(ctx: click.Context, config_path: str, verbose: bool) -> None:
     "--access-token",
     required=True,
     metavar="TOKEN",
-    help="Security token used to authenticate with the remote",
+    help="The security token that authenticates tide with the remote",
 )
 @click.option(
     "--remote",
@@ -97,17 +99,17 @@ def cli(ctx: click.Context, config_path: str, verbose: bool) -> None:
     metavar="REMOTE",
     show_default=True,
     help=(
-        "The name of the git remote in the current git repo "
-        "(e.g. configured using `git remote`) or the remote URL. "
-        "Providing a URL implies --no-local"
+        "The name of a git remote in the current git repo "
+        "(e.g. one configured with `git remote`), or the URL of the remote. "
+        "A URL implies --no-local"
     ),
 )
 @click.option(
     "--save-token/--no-save-token",
     default=True,
     help="Whether to save the access token into the remote as a reusable "
-    "variable. If this is disabled, you must configure the ACCESS_TOKEN "
-    "manually.",
+    "variable. If you disable this, you must set the ACCESS_TOKEN "
+    "variable yourself.",
 )
 @click.option(
     "--init-local/--no-local",
@@ -126,10 +128,10 @@ def init(
     init_local: bool,
     init_remote: bool,
 ) -> None:
-    """Initialize the current git repo and its associated Gitlab project for use with tide.
+    """Initialize the current git repo and its Gitlab project for use with tide.
 
-    This command must be run from a git repo, and the repo must have the Gitlab project setup
-    as a remote, either by being cloned from it, or via `git remote add`.
+    Run this command from a git repo. The repo must have the Gitlab project as a remote.
+    Clone the repo from Gitlab, or add the remote with `git remote add`.
     """
     import tempfile
 
@@ -137,8 +139,8 @@ def init(
         init_local = False
         remote_url = remote
     else:
-        # FIXME: print a user friendly error if we're not in a git repo.
-        # FIXME: handle remote not setup correctly
+        # FIXME: print a clear error when the current directory is not a git repo.
+        # FIXME: handle a remote that is not configured correctly.
         remote_url = git("remote", "get-url", remote, capture=True)
 
     backend = get_backend(remote_url)
@@ -146,7 +148,7 @@ def init(
     if init_local:
         backend.init_local_repo(remote)
     else:
-        # we may still need to create branches in the remote, so create a dummy clone
+        # The remote may still need branches, so clone it into a temporary directory.
         with tempfile.TemporaryDirectory() as tmpdir:
             git("clone", f"--branch={CONFIG.stable}", remote_url, tmpdir)
             pwd = os.getcwd()
@@ -156,11 +158,11 @@ def init(
             finally:
                 os.chdir(pwd)
 
-    # FIXME: add pyproject.toml section?  check if it exists?  Hard to do automatically,
-    #  because in a monorepo there could be many.
-    # FIXME: create a stub gitlab-ci.yml file if it doesn't exist?
+    # FIXME: add the `tool.tide` section to pyproject.toml, or check that it exists.
+    #  tide cannot do this automatically, because a monorepo can contain many.
+    # FIXME: create a stub gitlab-ci.yml file when none exists.
     if init_remote:
-        backend.init_remote_repo(remote_url, access_token, save_token)
+        backend.init_remote_repo(remote_url, access_token, save_token, get_branching_model())
 
 
 @cli.command()
@@ -168,7 +170,7 @@ def init(
     "--annotation",
     default="automatic change detected",
     show_default=True,
-    help="Message to pass for tag annotations.",
+    help="The message to store in the tag annotation.",
 )
 @click.option(
     "--base-rev",
@@ -181,18 +183,18 @@ def init(
     "projects",
     multiple=True,
     metavar="PROJECT",
-    help="The name of a modified tide project which should be tagged. "
-    "If unset, will be automatically determined by looking for changed "
-    "files in folders with valid pyproject.toml files. "
-    "(those with a `[project].name` value)",
+    help="The name of a modified tide project to tag. "
+    "If you do not set this, tide finds the projects that contain changed files. "
+    "A project is a folder with a pyproject.toml file that has a "
+    "`[project].name` value or a `[tool.tide].project` value.",
 )
 @click.option("--dry-run", is_flag=True, default=False)
 @click.option(
     "--fetch/--no-fetch",
     default=True,
     help="Whether to fetch the promotion marker notes from the remote. Use "
-    "--no-fetch to skip the fetch when it has already been performed up front, "
-    "e.g. to avoid concurrent fetches from parallel jobs.",
+    "--no-fetch when a previous step already fetched the notes, e.g. to stop "
+    "parallel jobs from fetching at the same time.",
 )
 def autotag(
     annotation: str,
@@ -203,120 +205,23 @@ def autotag(
 ) -> None:
     """Tag the current branch with a new version number.
 
-    The new tag is pushed to the remote repository.
+    tide pushes the new tag to the remote repository.
     """
-    runtime = get_runtime()
-    branch = runtime.current_branch()
-    remote = runtime.get_remote()
-
-    backend = get_backend()
-
-    if not base_rev:
-        base_rev = runtime.get_base_rev()
-
-    if projects:
-        path_mapping = {name: path for path, name in get_projects()}
-        projects_and_paths = [(path_mapping[name], name) for name in sorted(projects)]
-    else:
-        projects_and_paths = get_modified_projects(base_rev, verbose=CONFIG.verbose)
-    if projects_and_paths:
-        for project_folder, project_name in projects_and_paths:
-            # Auto-tag
-            tag = get_next_version(
-                CONFIG,
-                branch,
-                project_name=project_name,
-                remote=remote,
-                as_tag=True,
-                dry_run=False,
-                fetch=fetch,
-            )
-            # tag can be None if a branch has not yet received its first seed promotion.
-            # for example: prior to beta being promoted to rc, there will not be any
-            # rc tags, and we don't want to generate one until the first rc release
-            # comes into existence.
-            if tag is None:
-                continue
-
-            # NOTE: this delay is necessary to create stable sorting of tags
-            # because git's time resolution is 1s (same as unix timestamp).
-            # https://stackoverflow.com/questions/28237043/what-is-the-resolution-of-gits-commit-date-or-author-date-timestamps
-            time.sleep(1.1)
-
-            click.echo(
-                f"Creating new tag '{tag}' on branch {branch}"
-                + (" (dry_run=True)" if dry_run else "")
-            )
-            if not dry_run:
-                git("tag", "-a", tag, "-m", annotation)
-
-            # FIXME: we may want to push all tags at once
-            click.echo(f"Pushing '{tag}' to {remote}" + (" (dry_run=True)" if dry_run else ""))
-            if not dry_run:
-                backend.push(remote, tag)
-    else:
-        click.echo("No projects were modified and no tags generated!", err=True)
+    get_branching_model().autotag(
+        get_runtime(),
+        get_backend(),
+        annotation=annotation,
+        base_rev=base_rev,
+        projects=tuple(projects),
+        dry_run=dry_run,
+        fetch=fetch,
+    )
 
 
 @cli.command()
 def hotfix() -> None:
     """Merge hotfixes from a feature branch back to upstream branches."""
-    runtime = get_runtime()
-    branch = runtime.current_branch()
-    remote = runtime.get_remote()
-    upstream_branch = CONFIG.get_upstream_branch(branch)
-    if not upstream_branch:
-        click.echo(f"No branch upstream from {branch}. Skipping auto-merge")
-        return
-
-    # Auto-merge
-    # Record the current state
-    message = git("log", "--pretty=format: %s", "-1", capture=True)
-    # strip out previous Automerge formatting
-    match = re.match(HOTFIX_MESSAGE.format(upstream_branch="[^:]+", message="(.*)$"), message)
-    if match:
-        message = match.groups()[0]
-
-    tmp_branch = f"{branch}_temp"
-    git("checkout", "-B", tmp_branch)
-    start_rev = current_rev()
-    click.echo(f"Branch {branch} at {start_rev}")
-
-    try:
-        # Fetch the upstream branch
-        git("fetch", remote, upstream_branch)
-
-        rev = checkout_remote_branch(remote, upstream_branch)
-
-        click.echo(f"Branch {upstream_branch} at {rev}", err=True)
-
-        msg = HOTFIX_MESSAGE.format(upstream_branch=upstream_branch, message=message)
-        click.echo(msg, err=True)
-
-        try:
-            git("merge", f"{branch}_temp", "-m", msg)
-        except subprocess.CalledProcessError:
-            click.echo("Conflicts:", err=True)
-            git("diff", "--name-only", "--diff-filter=U")
-            raise click.ClickException("Encountered conflicts during merge")
-
-        # this will trigger a full pipeline for upstream_branch, and potentially another auto-merge
-        click.echo(f"Pushing {upstream_branch} to {remote}", err=True)
-        variables = {
-            f"{ENVVAR_PREFIX}_AUTOTAG_ANNOTATION": msg,
-        }
-        backend = get_backend()
-        try:
-            backend.push(remote, upstream_branch, variables=variables)
-        except subprocess.CalledProcessError as err:
-            click.echo(err, err=True)
-            git("remote", "-v")
-            print_git_graph(max_count=50)
-            raise click.ClickException("Failed to push changes")
-    finally:
-        # Cleanup
-        git("checkout", start_rev, quiet=True)
-        git("branch", "--delete", tmp_branch, quiet=True)
+    get_branching_model().hotfix(get_runtime(), get_backend())
 
 
 @cli.command()
@@ -325,12 +230,46 @@ def promote() -> None:
 
     e.g. from alpha -> beta -> rc -> stable.
     """
-    backend = get_backend()
-    runtime = get_runtime()
-    remote = runtime.get_remote()
-    if CONFIG.verbose:
-        click.echo(f"remote = {remote}")
-    _promote(CONFIG, backend, runtime)
+    get_branching_model().promote(get_runtime(), get_backend())
+
+
+@cli.command()
+@click.option(
+    "--target-branch",
+    required=True,
+    metavar="BRANCH",
+    help="The branch these changes are destined for, e.g. the target of a merge request.",
+)
+def validate(target_branch: str) -> None:
+    """Check the commits leading to HEAD against the rules of the branching mode.
+
+    This command exits non-zero with a distinct code for each rule. Your CI
+    configuration decides whether that failure blocks the pipeline. Run this job with
+    `allow_failure: true` to make it advisory.
+    """
+    model = get_branching_model()
+    commits = get_commits(_merge_base(target_branch))
+    model.validate(target_branch, commits=commits)
+    click.echo(f"{len(commits)} commit(s) validated against {target_branch}")
+
+
+def _merge_base(target_branch: str) -> str | None:
+    """Return the commit where HEAD diverged from `target_branch`.
+
+    Returns:
+        The merge base, or None if HEAD and `target_branch` share no history.
+    """
+    import subprocess
+
+    from .core import fetch_ref
+
+    ref = fetch_ref(target_branch, get_runtime().get_remote())
+    if ref is None:
+        raise click.ClickException(f"Could not resolve branch {target_branch!r}")
+    try:
+        return git("merge-base", ref, "HEAD", capture=True, quiet=True)
+    except subprocess.CalledProcessError:
+        return None
 
 
 @cli.command
@@ -338,15 +277,16 @@ def promote() -> None:
 # FIXME: add output format
 # FIXME: add option to write to file
 def projects(modified: bool) -> None:
-    """List project paths within the repo.
+    """List the project paths within the repo.
 
-    A project is a folder with a pyproject.toml file with a `tool.tide` section.
+    A project is a folder with a pyproject.toml file that has a `[project].name` value
+    or a `[tool.tide].project` value.
     """
     if modified:
         runtime = get_runtime()
         projects_ = get_modified_projects(runtime.get_base_rev(), verbose=CONFIG.verbose)
     else:
-        projects_ = get_projects()
+        projects_ = list(get_projects())
 
     for project_dir, project_name in projects_:
         if project_name is None:
@@ -360,15 +300,15 @@ def projects(modified: bool) -> None:
     "--at-ref",
     default=None,
     metavar="REF",
-    help="Git ref (commit SHA, branch, tag, etc.) to query version at. "
-    "Only existing tags at this ref will be considered.",
+    help="The git ref (commit SHA, branch, or tag) to read the version from. "
+    "tide reads only the tags that already point at this ref.",
 )
 @click.option(
     "--branch",
     default=None,
     metavar="BRANCH",
-    help="Release branch name to filter version tags by release phase. "
-    "Only applies when --at-ref is specified. "
+    help="The release branch that names the release phase to filter the tags by. "
+    "Use this option only with --at-ref. "
     "Examples: develop (alpha), staging (rc), master (stable).",
 )
 @click.option(
@@ -376,7 +316,7 @@ def projects(modified: bool) -> None:
     default=".",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     show_default=True,
-    help="Folder within the repository. A pyproject.toml should reside in the specified directory",
+    help="A folder within the repository. The folder must contain a pyproject.toml file",
 )
 def version(
     as_tag: bool,
@@ -384,7 +324,7 @@ def version(
     branch: str | None,
     path: Path,
 ) -> None:
-    """Get the current project version."""
+    """Print the current project version."""
     project_name = get_project_name(path)
     if project_name is None:
         raise click.ClickException(
@@ -399,11 +339,7 @@ def version(
     if at_ref:
         release_id = None
         if branch:
-            if branch not in CONFIG.branch_to_release_id:
-                raise click.ClickException(
-                    f"Unknown branch '{branch}'. Must be one of: {', '.join(CONFIG.branches)}"
-                )
-            release_id = CONFIG.branch_to_release_id[branch]
+            release_id = get_branching_model().release_id(branch)
 
         click.echo(
             get_version_at_ref(
@@ -423,7 +359,7 @@ def version(
     "--branch",
     default=None,
     help=(
-        "The release branch to use to determine the version release phase. "
+        "The release branch that determines the release phase of the version. "
         "Defaults to the current branch."
     ),
 )
@@ -431,7 +367,7 @@ def version(
     "--remote",
     default="origin",
     show_default=True,
-    help="The git remote to use when determining the next version.",
+    help="The git remote to query when tide determines the next version.",
 )
 @click.option("--as-tag", "-t", is_flag=True, default=False)
 @click.option(
@@ -439,7 +375,7 @@ def version(
     default=".",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     show_default=True,
-    help="Folder within the repository. A pyproject.toml should reside in the specified directory",
+    help="A folder within the repository. The folder must contain a pyproject.toml file",
 )
 def next_version(
     branch: str | None,
@@ -447,7 +383,7 @@ def next_version(
     as_tag: bool,
     path: Path,
 ) -> None:
-    """Get the next project version."""
+    """Print the next project version."""
     project_name = get_project_name(path)
     if project_name is None:
         raise click.ClickException(
@@ -460,7 +396,9 @@ def next_version(
         branch = runtime.current_branch()
 
     click.echo(
-        get_next_version(CONFIG, branch, project_name=project_name, remote=remote, as_tag=as_tag)
+        get_branching_model().next_version(
+            branch, project_name=project_name, remote=remote, as_tag=as_tag
+        )
     )
 
 
